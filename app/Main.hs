@@ -4,6 +4,8 @@ import Data.Monoid
 import Data.Text (Text, pack, unpack)
 import Deployment.Nix
 import Options.Applicative
+import Prelude hiding (FilePath)
+import Shelly hiding (command)
 
 -- | Helper to parse text
 textArgument :: Mod ArgumentFields String -> Parser Text
@@ -46,6 +48,17 @@ options = DeployOptions
         <> short 'd'
         <> help "Print steps to perform only"
         )
+      <*> textArgument (
+           metavar "NIX_FILE"
+        <> showDefault
+        <> value "./default.nix"
+        <> help "Which .nix file to deploy"
+        )
+      <*> (optional . textOption) (
+           long "nix-ssh-config"
+        <> metavar "NIX_SSH_CONFIG"
+        <> help "Which ssh config to use with nix-build"
+        )
     revertCmd = CommandRevert
       <$> textArgument (
           metavar "MACHINE_IP"
@@ -66,22 +79,37 @@ options = DeployOptions
         <> value "root"
         <> help "Which user to deploy with"
         )
+      <*> textArgument (
+           metavar "NIX_FILE"
+        <> showDefault
+        <> value "./default.nix"
+        <> help "Which .nix file to deploy"
+        )
+      <*> (optional . textOption) (
+           long "nix-ssh-config"
+        <> metavar "NIX_SSH_CONFIG"
+        <> help "Which ssh config to use with nix-build"
+        )
 
 main :: IO ()
 main = do
   opts <- execParser opts
-  runDeployment opts debugPlan
+  runDeployment opts $ nixBuildPlan (getNixBuildInfo opts)
   where
     opts = info (options <**> helper)
       ( fullDesc
      <> progDesc "Deploys the project with nix on non nixos machine"
      <> header "nixdeploy - deployment tool" )
 
-debugPlan :: RemoteHost -> Task ()
-debugPlan rh = do
+-- | Plan to build nix project and deploy it on remote host
+nixBuildPlan :: NixBuildInfo -> RemoteHost -> Task ()
+nixBuildPlan nixBuildInfo rh = do
   aptPackages rh ["curl"]
   let deployUser = "deploy"
   addUser rh deployUser
   installNix rh deployUser
   dontReverse genNixSignKeys
   copyNixSignKeys rh
+  derivs <- nixBuild nixBuildInfo
+  liftShell "Print derivs" () $ mapM_ (echo . toTextIgnore) derivs
+  pure ()

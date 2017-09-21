@@ -1,5 +1,6 @@
 module Deployment.Nix.Task.Common(
     RemoteHost(..)
+  , NixBuildInfo(..)
   , shellRemoteSSH
   , dontReverse
   , aptPackages
@@ -8,6 +9,7 @@ module Deployment.Nix.Task.Common(
   , raiseNixEnv
   , genNixSignKeys
   , copyNixSignKeys
+  , nixBuild
   ) where
 
 import Data.Functor
@@ -24,6 +26,12 @@ data RemoteHost = RemoteHost {
   remoteAddress :: Text
 , remotePort    :: Int
 , remoteUser    :: Text
+}
+
+-- | Compact info needed to build nix project
+data NixBuildInfo = NixBuildInfo {
+  nixBuildFile :: FilePath
+, nixBuildSshConfig :: Maybe FilePath
 }
 
 -- | Exec shell commands (concated via &&) on remote host via SSH
@@ -139,5 +147,19 @@ copyNixSignKeys rh = AtomTask {
 , taskReverse = shelly $ errExit False $ do
     _ <- shellRemoteSSH rh [("rm", ["-f", keyPos])]
     pure ()
+}
+  where keyPos = "/etc/nix/signing-key.pub"
+
+-- | Build .nix file with `nix-build` with optional path to ssh-config-file.
+-- Returns list of deriviations that were built.
+nixBuild :: NixBuildInfo -> Task [FilePath]
+nixBuild NixBuildInfo{..} = AtomTask {
+  taskName = Just $ "Local nix-build of " <> toTextIgnore nixBuildFile
+, taskCheck = pure (True, [])
+, taskApply = shelly $ do
+    nixFileText <- toTextWarn nixBuildFile
+    bash_ "nix-build" [maybe "" (("-I ssh-config-file=" <>) . toTextIgnore) nixBuildSshConfig, nixFileText]
+    fmap fromText . T.lines <$> bash "nix-env" ["-qa", "--no-name", "--out-path", "-f " <> nixFileText]
+, taskReverse = pure ()
 }
   where keyPos = "/etc/nix/signing-key.pub"

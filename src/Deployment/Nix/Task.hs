@@ -3,6 +3,7 @@ module Deployment.Nix.Task(
   , executeTask
   , reverseTask
   , dryRunTask
+  , liftShell
   ) where
 
 import Control.Exception.Base (SomeException)
@@ -58,6 +59,20 @@ instance Monad Task where
   return = pure
   (>>=) = TaskMonadic
 
+-- | Lift named shell action to task
+liftShell :: Text -> a -> Sh a -> Task a
+liftShell name a0 ma = AtomTask {
+    taskName = Just name
+  , taskCheck = pure (True, a0)
+  , taskApply = shelly ma
+  , taskReverse = pure ()
+  }
+
+-- | Apply effects only when encounter 'Just'
+whenJust :: Applicative f => Maybe a -> (a -> f ()) -> f ()
+whenJust Nothing _ = pure ()
+whenJust (Just a) f = f a
+
 -- | Apply task if needed
 executeTask :: forall a . Task a -> TransIO a
 executeTask = go
@@ -65,13 +80,13 @@ executeTask = go
     go :: Task b -> TransIO b
     go t = case t of
       AtomTask{..} -> do
-        shelly $ echo_n $ "Checking task " <> fromMaybe "unnamed" taskName <> "... "
+        whenJust taskName $ \nm -> shelly $ echo_n $ "Checking task " <> nm <> "... "
         (needApply, a) <- taskCheck
         shelly $ echo $ pack (show needApply)
         if needApply then do
-            shelly $ echo $ "Applying task " <> fromMaybe "unnamed" taskName
+            whenJust taskName $ \nm -> shelly $ echo $ "Applying task " <> nm
             onException $ \(e :: SomeException) -> do
-              shelly $ echo $ "Reversing task " <> fromMaybe "unnamed" taskName
+              whenJust taskName $ \nm -> shelly $ echo $ "Reversing task " <> nm
               taskReverse
             taskApply
           else pure a
@@ -88,7 +103,7 @@ reverseTask :: forall a . Task a -> TransIO ()
 reverseTask t = do
   (_, ms) <- go t
   forM_ ms $ \(mn, m) -> do
-    shelly . echo $ "Reversing " <> fromMaybe "unnamed" mn
+    whenJust mn $ \name -> shelly . echo $ "Reversing " <> name
     m
   where
     go :: Task b -> TransIO (b, [(Maybe Text, TransIO ())])
