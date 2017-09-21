@@ -22,8 +22,10 @@ library
   default-language: Haskell2010
   build-depends:
       base                  >= 4.7      && < 5
-    , shelly                >= 1.6      && < 1.7
     , text                  >= 1.2      && < 1.3
+    , transient             >= 0.5      && < 0.6
+    , transient-universe    >= 0.4      && < 0.5
+    , shelly                >= 1.5      && < 1.7
   default-extensions:
     GADTs
     OverloadedStrings
@@ -37,6 +39,15 @@ executable nixdeploy
   default-language:    Haskell2010
   build-depends:
       base                  >= 4.7      && < 5
+    , nixdeploy
     , optparse-applicative  >= 0.13     && < 0.15
     , text                  >= 1.2      && < 1.3
-    , nixdeploy
+    , transient             >= 0.5      && < 0.6
+    , transient-universe    >= 0.4      && < 0.5
+    , shelly                >= 1.5      && < 1.7
+  default-extensions:
+    GADTs
+    OverloadedStrings
+    RecordWildCards
+    ScopedTypeVariables
+    TupleSections
