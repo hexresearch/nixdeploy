@@ -82,7 +82,7 @@ executeTask = go
       AtomTask{..} -> do
         whenJust taskName $ \nm -> shelly $ echo_n $ "Checking task " <> nm <> "... "
         (needApply, a) <- taskCheck
-        shelly $ echo $ pack (show needApply)
+        whenJust taskName $ \nm -> shelly $ echo $ if needApply then "need apply" else "ok"
         if needApply then do
             whenJust taskName $ \nm -> shelly $ echo $ "Applying task " <> nm
             onException $ \(e :: SomeException) -> do

@@ -1,15 +1,20 @@
 module Deployment.Nix.Task.Common(
     RemoteHost(..)
   , NixBuildInfo(..)
+  , remoteHostTarget
   , shellRemoteSSH
   , dontReverse
   , aptPackages
   , addUser
   , installNix
+  , makeNixLinks
   , raiseNixEnv
   , genNixSignKeys
   , copyNixSignKeys
+  , copyDeploySshKeys
   , nixBuild
+  , nixCopyClosures
+  , nixCreateProfile
   ) where
 
 import Data.Functor
@@ -28,6 +33,10 @@ data RemoteHost = RemoteHost {
 , remoteUser    :: Text
 }
 
+-- | Construct user@host
+remoteHostTarget :: RemoteHost -> Text
+remoteHostTarget RemoteHost{..} = remoteUser <> "@" <> remoteAddress
+
 -- | Compact info needed to build nix project
 data NixBuildInfo = NixBuildInfo {
   nixBuildFile :: FilePath
@@ -36,15 +45,11 @@ data NixBuildInfo = NixBuildInfo {
 
 -- | Exec shell commands (concated via &&) on remote host via SSH
 shellRemoteSSH :: RemoteHost -> [(FilePath, [Text])] -> Sh Text
-shellRemoteSSH RemoteHost{..} = sshPairsWithOptions sshConnectString ["-p " <> pack (show remotePort)]
-  where
-    sshConnectString = remoteUser <> "@" <> remoteAddress
+shellRemoteSSH rh@RemoteHost{..} = sshPairsWithOptions (remoteHostTarget rh) ["-p " <> pack (show remotePort)]
 
 -- | Copy file from local machine to remote host
 remoteScpTo :: RemoteHost -> FilePath -> FilePath -> Sh ()
-remoteScpTo RemoteHost{..} from to = run_ "scp" ["-P " <> pack (show remotePort), toTextIgnore from, sshConnectString <> ":" <> toTextIgnore to]
-  where
-    sshConnectString = remoteUser <> "@" <> remoteAddress
+remoteScpTo rh@RemoteHost{..} from to = run_ "scp" ["-P " <> pack (show remotePort), toTextIgnore from, remoteHostTarget rh <> ":" <> toTextIgnore to]
 
 -- | Don't actually reverse actions for the tasks
 dontReverse :: Task a -> Task a
@@ -112,6 +117,26 @@ installNix rh deployUser = AtomTask {
     pure ()
 }
 
+-- | Make symlinks to /usr/bin to important nix binaries after installation, so
+-- we can execute nic-copy-closures.
+makeNixLinks :: RemoteHost -> Text -> Task ()
+makeNixLinks rh deployUser = AtomTask {
+  taskName = Just $ "Making global nix symlinks from user " <> deployUser
+, taskCheck = shelly $ errExit False $ do
+    isStore <- checkFile "/usr/bin/nix-store"
+    pure (not isStore, ())
+, taskApply = void $ shelly $
+    shellRemoteSSH rh [("ln", ["-s", "/home/" <> deployUser <> "/.nix-profile/bin/nix-store", "/usr/bin/nix-store"])]
+, taskReverse = shelly $ errExit False $ do
+    _ <- shellRemoteSSH rh [("rm", ["-f", "/usr/bin/nix-store"])]
+    pure ()
+}
+  where
+    checkFile path = do
+      _ <- shellRemoteSSH rh [("ls", [path <> " > /dev/null 2>&1"])]
+      err <- lastExitCode
+      pure $ err == 0
+
 -- | Helper to bring nix environment in scope
 raiseNixEnv :: Text -> (FilePath, [Text])
 raiseNixEnv deployUser = ("source", ["/home/" <> deployUser <> "/.nix-profile/etc/profile.d/nix.sh"])
@@ -127,7 +152,7 @@ genNixSignKeys = AtomTask {
     pure (not privateExist || not publicExist, ())
 , taskApply = shelly $ escaping False $ do
     bash_ "sudo mkdir -p /etc/nix || true" []
-    bash_ "(umask 277 && sudo openssl genrsa -out /etc/nix/signing-key.sec 2048)" []
+    bash_ "(umask 277 && sudo openssl genrsa -out /etc/nix/signing-key.sec 2048 && sudo chown $(whoami) /etc/nix/signing-key.sec)" []
     bash_ "sudo openssl rsa -in /etc/nix/signing-key.sec -pubout -out /etc/nix/signing-key.pub" []
 , taskReverse = shelly $ errExit False $
     bash_ "sudo" ["rm", "-f", "/etc/nix/signing-key.sec", "/etc/nix/signing-key.pub"]
@@ -163,3 +188,51 @@ nixBuild NixBuildInfo{..} = AtomTask {
 , taskReverse = pure ()
 }
   where keyPos = "/etc/nix/signing-key.pub"
+
+-- | Copy ssh keys from ssh'ing user to given deploy user, so we can envoke nix-copy-closure
+copyDeploySshKeys :: RemoteHost -> Text -> Task ()
+copyDeploySshKeys rh deployUser = AtomTask {
+  taskName = Just $ "Copy SSH keys for user " <> deployUser
+, taskCheck = pure (True, ())
+, taskApply = shelly $ do
+    _ <- shellRemoteSSH rh [("cp", ["-r", "~/.ssh", "/home/" <> deployUser <> "/.ssh"])
+      , ("chown", [deployUser, "-R", "/home/" <> deployUser <> "/.ssh"])]
+    -- _ <- errExit False $ shellRemoteSSH rh [("ln", ["/home/" <> deployUser <> "/.profile", "/home/" <> deployUser <> "/.bashrc"])]
+    pure ()
+, taskReverse = pure ()
+}
+
+-- | Sign, copy and install nix closures on remote host, need ability to ssh to deployUser
+nixCopyClosures :: RemoteHost -> Text -> [FilePath] -> Task ()
+nixCopyClosures rh deployUser closures = AtomTask {
+    taskName = Just $ "Copy closures to " <> remoteAddress rh
+  , taskCheck = pure (True, ())
+  , taskApply = shelly $ do
+      run "nix-copy-closure" $ ["--sign", "--gzip", "--to", remoteHostTarget rh { remoteUser = deployUser }]  ++ fmap toTextArg closures-- TODO: pass port
+      _ <- shellRemoteSSH rh [raiseNixEnv deployUser, ("sudo", ["-i", "-u " <> deployUser, "nix-env", "-p /opt/deploy/profile", "--set"] ++ fmap toTextArg closures)]
+      pure ()
+  , taskReverse = shelly $ errExit False $ do
+    _ <- shellRemoteSSH rh [raiseNixEnv deployUser, ("sudo", ["-i", "-u " <> deployUser, "nix-env", "-p /opt/deploy/profile", "-e"] ++ fmap toTextArg closures)]
+    pure ()
+  }
+
+-- | Create nix profile for remote user
+nixCreateProfile :: RemoteHost -> Text -> Task ()
+nixCreateProfile rh deployUser = AtomTask {
+    taskName = Just $ "Create nix profile for " <> deployUser <> " at " <> remoteAddress rh
+  , taskCheck = shelly $ errExit False $ do
+      _ <- shellRemoteSSH rh [("ls", ["/opt/" <> deployUser <> " > /dev/null 2>&1"])]
+      err <- lastExitCode
+      pure (err /= 0, ())
+  , taskApply = shelly $ do
+      let profileDir = "/opt/" <> deployUser
+      _ <- shellRemoteSSH rh [
+          ("mkdir", ["-p", profileDir])
+        , ("chown", ["-R", deployUser, profileDir])
+        , ("ln", ["-s", profileDir <> "/profile", "/nix/var/nix/gcroots/" <> deployUser])
+        ]
+      pure ()
+  , taskReverse = shelly $ errExit False $ do
+      _ <- shellRemoteSSH rh [("rm", ["-rf", "/opt/" <> deployUser, "/nix/var/nix/gcroots/" <> deployUser])]
+      pure ()
+  }
