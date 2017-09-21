@@ -6,6 +6,8 @@ module Deployment.Nix.Task.Common(
   , addUser
   , installNix
   , raiseNixEnv
+  , genNixSignKeys
+  , copyNixSignKeys
   ) where
 
 import Data.Functor
@@ -26,7 +28,13 @@ data RemoteHost = RemoteHost {
 
 -- | Exec shell commands (concated via &&) on remote host via SSH
 shellRemoteSSH :: RemoteHost -> [(FilePath, [Text])] -> Sh Text
-shellRemoteSSH RemoteHost{..} = sshPairsWithOptions sshConnectString ["-p" <> pack (show remotePort)]
+shellRemoteSSH RemoteHost{..} = sshPairsWithOptions sshConnectString ["-p " <> pack (show remotePort)]
+  where
+    sshConnectString = remoteUser <> "@" <> remoteAddress
+
+-- | Copy file from local machine to remote host
+remoteScpTo :: RemoteHost -> FilePath -> FilePath -> Sh ()
+remoteScpTo RemoteHost{..} from to = run_ "scp" ["-P " <> pack (show remotePort), toTextIgnore from, sshConnectString <> ":" <> toTextIgnore to]
   where
     sshConnectString = remoteUser <> "@" <> remoteAddress
 
@@ -99,3 +107,37 @@ installNix rh deployUser = AtomTask {
 -- | Helper to bring nix environment in scope
 raiseNixEnv :: Text -> (FilePath, [Text])
 raiseNixEnv deployUser = ("source", ["/home/" <> deployUser <> "/.nix-profile/etc/profile.d/nix.sh"])
+
+-- | Generates local signin keys. Consider usage of `dontReverse` to not remove
+-- your signin keys accidentally. Requires sudo.
+genNixSignKeys :: Task ()
+genNixSignKeys = AtomTask {
+  taskName = Just "Generate local signin keys for closures"
+, taskCheck = shelly $ errExit False $ do
+    privateExist <- test_f "/etc/nix/signing-key.sec"
+    publicExist <- test_f "/etc/nix/signing-key.pub"
+    pure (not privateExist || not publicExist, ())
+, taskApply = shelly $ escaping False $ do
+    bash_ "sudo mkdir -p /etc/nix || true" []
+    bash_ "(umask 277 && sudo openssl genrsa -out /etc/nix/signing-key.sec 2048)" []
+    bash_ "sudo openssl rsa -in /etc/nix/signing-key.sec -pubout -out /etc/nix/signing-key.pub" []
+, taskReverse = shelly $ errExit False $
+    bash_ "sudo" ["rm", "-f", "/etc/nix/signing-key.sec", "/etc/nix/signing-key.pub"]
+}
+
+-- | Transfer nix signing keys to remote host
+copyNixSignKeys :: RemoteHost -> Task ()
+copyNixSignKeys rh = AtomTask {
+  taskName = Just $ "Copy signing keys to " <> remoteAddress rh
+, taskCheck = shelly $ errExit False $ do
+    _ <- shellRemoteSSH rh [("ls", [keyPos <> " > /dev/null 2>&1"])]
+    err <- lastExitCode
+    pure (err /= 0, ())
+, taskApply = shelly $ do
+    _ <- errExit False $ shellRemoteSSH rh [("mkdir", ["-p", "/etc/nix"])]
+    remoteScpTo rh (fromText keyPos) (fromText keyPos)
+, taskReverse = shelly $ errExit False $ do
+    _ <- shellRemoteSSH rh [("rm", ["-f", keyPos])]
+    pure ()
+}
+  where keyPos = "/etc/nix/signing-key.pub"

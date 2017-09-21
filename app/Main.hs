@@ -83,3 +83,5 @@ debugPlan rh = do
   let deployUser = "deploy"
   addUser rh deployUser
   installNix rh deployUser
+  dontReverse genNixSignKeys
+  copyNixSignKeys rh
