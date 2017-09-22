@@ -8,6 +8,9 @@ module Deployment.Nix(
   , getNixBuildInfo
   , getRemoteHost
   , module R
+  -- * CLI helpers
+  , deployOptionsParser
+  , makeDeploymentCLI
   ) where
 
 import Data.Foldable (traverse_)
@@ -15,8 +18,9 @@ import Data.Functor
 import Data.Maybe
 import Data.Monoid
 import Data.Text (Text, pack, unpack)
-import Shelly
-import Transient.Base
+import Options.Applicative
+import Shelly hiding (command)
+import Transient.Base hiding (option)
 
 import qualified Data.Text as T
 
@@ -61,18 +65,110 @@ getRemoteHost DeployOptions{..} = case optionsCommand of
   CommandRevert{..} -> RemoteHost deployHost deployPort deployUser
 
 -- | Execute program with given options
-runDeployment :: DeployOptions -> (RemoteHost -> Task a) -> IO ()
-runDeployment o@DeployOptions{..} mkBuildPlan = do
-  let buildPlan = mkBuildPlan $ getRemoteHost o
+runDeployment :: DeployOptions -> Task a -> IO ()
+runDeployment o@DeployOptions{..} buildPlan = do
   void $ keep' $ case optionsCommand of
     CommandDeploy{..} -> do
-      shelly . echo $ "Deploy!"
       if deployDry then do
           infos <- dryRunTask buildPlan
           shelly . echo $ T.unlines $ (\(mn, b) -> fromMaybe "unnamed" mn <> " is " <> if b then "applied" else "not applied" ) <$> infos
         else void $ executeTask buildPlan
-      shelly . echo $ "Finished!"
-      -- stop :: TransIO ()
-    CommandRevert{..} -> do
-      reverseTask buildPlan
-      stop
+    CommandRevert{..} -> reverseTask buildPlan
+
+-- | Helper to parse text
+textArgument :: Mod ArgumentFields String -> Parser Text
+textArgument = fmap pack . strArgument
+
+-- | Helper to parse text
+textOption :: Mod OptionFields String -> Parser Text
+textOption = fmap pack . strOption
+
+-- | CLI parser
+deployOptionsParser :: Parser DeployOptions
+deployOptionsParser = DeployOptions
+  <$> cliCommand
+  where
+    cliCommand = subparser $
+         command "deploy" (info (deployCmd <**> helper) $ progDesc "Apply deployment to remote host")
+      <> command "revert" (info (revertCmd <**> helper) $ progDesc "Reverse deployment at remote host")
+    deployCmd = CommandDeploy
+      <$> textArgument (
+          metavar "MACHINE_IP"
+        )
+      <*> option auto (
+           long "port"
+        <> short 'p'
+        <> metavar "DEPLOY_PORT"
+        <> showDefault
+        <> value 22
+        <> help "Default SSH port"
+      )
+      <*> textOption (
+           long "user"
+        <> short 'u'
+        <> metavar "DEPLOY_USER"
+        <> showDefault
+        <> value "root"
+        <> help "Which user to deploy with"
+        )
+      <*> switch (
+           long "dry"
+        <> short 'd'
+        <> help "Print steps to perform only"
+        )
+      <*> textArgument (
+           metavar "NIX_FILE"
+        <> showDefault
+        <> value "./default.nix"
+        <> help "Which .nix file to deploy"
+        )
+      <*> (optional . textOption) (
+           long "nix-ssh-config"
+        <> metavar "NIX_SSH_CONFIG"
+        <> help "Which ssh config to use with nix-build"
+        )
+    revertCmd = CommandRevert
+      <$> textArgument (
+          metavar "MACHINE_IP"
+        )
+      <*> option auto (
+           long "port"
+        <> short 'p'
+        <> metavar "DEPLOY_PORT"
+        <> showDefault
+        <> value 22
+        <> help "Default SSH port"
+      )
+      <*> textOption (
+           long "user"
+        <> short 'u'
+        <> metavar "DEPLOY_USER"
+        <> showDefault
+        <> value "root"
+        <> help "Which user to deploy with"
+        )
+      <*> textArgument (
+           metavar "NIX_FILE"
+        <> showDefault
+        <> value "./default.nix"
+        <> help "Which .nix file to deploy"
+        )
+      <*> (optional . textOption) (
+           long "nix-ssh-config"
+        <> metavar "NIX_SSH_CONFIG"
+        <> help "Which ssh config to use with nix-build"
+        )
+
+-- | Generate CLI application for deployment with given build plan
+makeDeploymentCLI :: Parser a -- ^ CLI parser
+  -> (a -> DeployOptions) -- ^ How to extract deploy options from the cli parser result
+  -> (a -> Task ()) -- ^ Build plan
+  -> IO ()
+makeDeploymentCLI parser getOpts buildPlan = do
+  a <- execParser parserInfo
+  runDeployment (getOpts a) $ buildPlan a
+  where
+    parserInfo = info (parser <**> helper)
+      ( fullDesc
+     <> progDesc "Deploys the project with nix on non nixos machine"
+     <> header "nixdeploy - deployment tool" )
