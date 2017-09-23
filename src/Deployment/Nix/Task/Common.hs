@@ -15,6 +15,11 @@ module Deployment.Nix.Task.Common(
   , nixBuild
   , nixCopyClosures
   , nixCreateProfile
+  , nixExtractDeriv
+  , nixSymlinkService
+  , restartRemoteService
+  , ensureRemoteFolder
+  , installPostgres
   ) where
 
 import Data.Functor
@@ -71,9 +76,9 @@ aptPackages rh pkgs = AtomTask {
     reses <- traverse isNotInstalled pkgs
     pure (or reses, ())
 , taskApply = void $ shelly $
-    shellRemoteSSH rh [("apt-get", ["update"]), ("apt-get", "install":pkgs)]
+    shellRemoteSSH rh [("apt-get", ["update"]), ("apt-get", "install":"-y":pkgs)]
 , taskReverse = shelly $ errExit False $ do
-    _ <- shellRemoteSSH rh [("apt-get", "erase":pkgs)]
+    _ <- shellRemoteSSH rh [("apt-get", "erase":"-y":pkgs)]
     pure ()
 }
   where
@@ -81,6 +86,18 @@ aptPackages rh pkgs = AtomTask {
       _ <- shellRemoteSSH rh [("dpkg", ["--get-selections | grep -q \"^" <> name <> "[[:space:]]*install$\""])]
       err <- lastExitCode
       pure (err /= 0)
+
+-- | Check that folder on host exist and create if missing
+ensureRemoteFolder :: RemoteHost -> Text -> Text -> Task ()
+ensureRemoteFolder rh folder user = AtomTask {
+  taskName = Just $ "Ensure folder " <> folder <> " at " <> remoteAddress rh
+, taskCheck = shelly $ errExit False $ do
+    _ <- shellRemoteSSH rh [("ls", [folder <> " > /dev/null 2>&1"])] -- TODO: check that is directory and own user
+    err <- lastExitCode
+    pure (err /= 0, ())
+, taskApply = void $ shelly $ shellRemoteSSH rh [("mkdir", ["-p", folder]), ("chown", ["-R", user, folder])]
+, taskReverse = pure ()
+}
 
 -- | Add user on remote host
 addUser :: RemoteHost -> Text -> Task ()
@@ -209,10 +226,12 @@ nixCopyClosures rh deployUser closures = AtomTask {
   , taskCheck = pure (True, ())
   , taskApply = shelly $ do
       run "nix-copy-closure" $ ["--sign", "--gzip", "--to", remoteHostTarget rh { remoteUser = deployUser }]  ++ fmap toTextArg closures-- TODO: pass port
-      _ <- shellRemoteSSH rh [raiseNixEnv deployUser, ("sudo", ["-i", "-u " <> deployUser, "nix-env", "-p /opt/deploy/profile", "--set"] ++ fmap toTextArg closures)]
+      let installProfile closure = ("sudo", ["-i", "-u " <> deployUser, "nix-env", "-p /opt/deploy/profile", "-i", toTextArg closure])
+      _ <- shellRemoteSSH rh $ raiseNixEnv deployUser : fmap installProfile closures
       pure ()
   , taskReverse = shelly $ errExit False $ do
-    _ <- shellRemoteSSH rh [raiseNixEnv deployUser, ("sudo", ["-i", "-u " <> deployUser, "nix-env", "-p /opt/deploy/profile", "-e"] ++ fmap toTextArg closures)]
+    let remoteProfile closure = ("sudo", ["-i", "-u " <> deployUser, "nix-env", "-p /opt/deploy/profile", "-e", toTextArg closure])
+    _ <- shellRemoteSSH rh (raiseNixEnv deployUser : fmap remoteProfile closures)
     pure ()
   }
 
@@ -236,3 +255,75 @@ nixCreateProfile rh deployUser = AtomTask {
       _ <- shellRemoteSSH rh [("rm", ["-rf", "/opt/" <> deployUser, "/nix/var/nix/gcroots/" <> deployUser])]
       pure ()
   }
+
+-- | Extract service derivation from nix file
+nixExtractDeriv :: NixBuildInfo -> Text -> Task Text
+nixExtractDeriv NixBuildInfo{..} name = AtomTask {
+    taskName = Just $ "Get deriviation for " <> name
+  , taskCheck = shelly $ do
+      res <- extract
+      pure (False, T.filter (\c -> c /= '\r' && c /= '\n') res)
+  , taskApply = shelly extract
+  , taskReverse = pure ()
+  }
+  where
+    extract = do
+      nixFileText <- toTextWarn nixBuildFile
+      bash "nix-build" [maybe "" (("-I ssh-config-file=" <>) . toTextIgnore) nixBuildSshConfig, nixFileText, "-A " <> name]
+
+-- | Symlink given derivations to systemd folder
+nixSymlinkService :: RemoteHost -> Text -> Text -> Task ()
+nixSymlinkService rh deriv serviceName = AtomTask {
+    taskName = Just $ "Symlink systemd service " <> serviceName <> " at " <> remoteAddress rh
+  , taskCheck = pure (True, ())
+  , taskApply = shelly $ print_commands True $ do
+      _ <- errExit False $ shellRemoteSSH rh [("rm", ["-f", servicePath])]
+      _ <- shellRemoteSSH rh [
+          ("cp", [deriv, servicePath])
+        , ("systemctl", ["enable", serviceName <> ".service"])
+        , ("systemctl", ["daemon-reload"])
+        ]
+      pure ()
+  , taskReverse = shelly $ errExit False $ do
+      _ <- shellRemoteSSH rh [
+          ("systemctl", ["disable", serviceName <> ".service"])
+        , ("rm", ["-f", servicePath])
+        ]
+      pure ()
+  }
+  where
+    servicePath = "/etc/systemd/system/" <> serviceName <> ".service"
+
+-- | Restart given remote service with given name
+restartRemoteService :: RemoteHost -> Text -> Task ()
+restartRemoteService rh serviceName = AtomTask {
+    taskName = Just $ "Restart systemd service " <> serviceName <> " at " <> remoteAddress rh
+  , taskCheck = pure (True, ())
+  , taskApply = shelly $ do
+      _ <- shellRemoteSSH rh [("systemctl", ["restart", serviceName])]
+      pure ()
+  , taskReverse = pure ()
+  }
+
+-- | Ensure that postgres is installed and init it with the given script (derivation path)
+installPostgres :: RemoteHost -> Text -> Task ()
+installPostgres rh derivSql =  AtomTask {
+  taskName = Just $ "Init postgresql at " <> remoteAddress rh
+, taskCheck = shelly $ errExit False $ do
+    reses <- isNotInstalled "postgresql"
+    pure (reses, ())
+, taskApply = void $ shelly $
+    shellRemoteSSH rh [
+        ("apt-get", ["install", "-y", "postgresql", "postgresql-contrib"])
+      , ("systemctl", ["enable", "postgresql"])
+      , ("systemctl", ["start", "postgresql"])
+      , ("sudo", ["-i", "-u postgres", "psql", "-f " <> derivSql])]
+, taskReverse = shelly $ errExit False $ do
+    _ <- shellRemoteSSH rh [("apt-get", ["erase", "-y", "postgresql"])]
+    pure ()
+}
+  where
+    isNotInstalled name = do
+      _ <- shellRemoteSSH rh [("dpkg", ["--get-selections | grep -q \"^" <> name <> "[[:space:]]*install$\""])]
+      err <- lastExitCode
+      pure (err /= 0)
