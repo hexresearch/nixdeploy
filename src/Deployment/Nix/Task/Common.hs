@@ -78,7 +78,7 @@ aptPackages rh pkgs = AtomTask {
 , taskApply = void $ shelly $
     shellRemoteSSH rh [("apt-get", ["update"]), ("apt-get", "install":"-y":pkgs)]
 , taskReverse = shelly $ errExit False $ do
-    _ <- shellRemoteSSH rh [("apt-get", "erase":"-y":pkgs)]
+    _ <- shellRemoteSSH rh [("apt-get", "remove":"-y":pkgs)]
     pure ()
 }
   where
@@ -319,7 +319,7 @@ installPostgres rh derivSql =  AtomTask {
       , ("systemctl", ["start", "postgresql"])
       , ("sudo", ["-i", "-u postgres", "psql", "-f " <> derivSql])]
 , taskReverse = shelly $ errExit False $ do
-    _ <- shellRemoteSSH rh [("apt-get", ["erase", "-y", "postgresql"])]
+    _ <- shellRemoteSSH rh [("apt-get", ["remove", "-y", "postgresql"])]
     pure ()
 }
   where
