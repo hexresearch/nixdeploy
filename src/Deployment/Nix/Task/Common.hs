@@ -272,23 +272,21 @@ nixExtractDeriv NixBuildInfo{..} name = AtomTask {
       bash "nix-build" [maybe "" (("-I ssh-config-file=" <>) . toTextIgnore) nixBuildSshConfig, nixFileText, "-A " <> name]
 
 -- | Symlink given derivations to systemd folder
-nixSymlinkService :: RemoteHost -> Text -> Text -> Task ()
-nixSymlinkService rh deriv serviceName = AtomTask {
+nixSymlinkService :: RemoteHost -> Text -> Text -> Bool -> Task ()
+nixSymlinkService rh deriv serviceName enable = AtomTask {
     taskName = Just $ "Symlink systemd service " <> serviceName <> " at " <> remoteAddress rh
   , taskCheck = pure (True, ())
   , taskApply = shelly $ print_commands True $ do
       _ <- errExit False $ shellRemoteSSH rh [("rm", ["-f", servicePath])]
-      _ <- shellRemoteSSH rh [
-          ("cp", [deriv, servicePath])
-        , ("systemctl", ["enable", serviceName <> ".service"])
-        , ("systemctl", ["daemon-reload"])
-        ]
+      _ <- shellRemoteSSH rh $
+        [ ("cp", [deriv, servicePath])]
+        ++ if enable then [("systemctl", ["enable", serviceName <> ".service"])] else []
+        ++ [("systemctl", ["daemon-reload"])]
       pure ()
   , taskReverse = shelly $ errExit False $ do
-      _ <- shellRemoteSSH rh [
-          ("systemctl", ["disable", serviceName <> ".service"])
-        , ("rm", ["-f", servicePath])
-        ]
+      _ <- shellRemoteSSH rh $
+           if enable then [("systemctl", ["disable", serviceName <> ".service"])] else []
+        ++ [("rm", ["-f", servicePath])]
       pure ()
   }
   where

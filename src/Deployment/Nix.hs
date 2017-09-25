@@ -38,6 +38,8 @@ data DeployOptions = DeployOptions {
 , deployPort          :: Int -- ^ ssh port
 , deployUser          :: Text
 , deployServices      :: [Text] -- ^ Names of derivations in `deployNixFile` that are symlinked to /etc/systemd/system
+, deployTools         :: [Text] -- ^ Names of derivations in `deployNixFile` that are symlinked to /etc/systemd/system, but not enabled.
+                                -- They are usually a one-shot systemd units for administrative tools.
 , deployFolders       :: [Text] -- ^ Set of folders that we need to create on remote machine
 , deployPostgres      :: Maybe Text -- ^ Path to deriviation with SQL init script
 }
@@ -118,6 +120,11 @@ deployOptionsParser = DeployOptions
     <> help "Derivation in .nix file that should be symlinked as systemd service"
     )
   <*> (many . textOption) (
+       long "tool"
+    <> metavar "SERVICE_ATR_NAME"
+    <> help "Derivation in .nix file that should be symlinked as systemd service, but not enabled"
+    )
+  <*> (many . textOption) (
        long "folder"
     <> metavar "FOLDER_PATH"
     <> help "Folder on remote machine that we need to create if it is missing"
@@ -163,8 +170,10 @@ whenJust Nothing _ = pure ()
 whenJust (Just a) f = f a
 
 -- | Plan to build nix project and deploy it on remote host
-defaultNixPlan :: NixBuildInfo -> RemoteHost -> [Text] -> [Text] -> Maybe Text -> Task ()
-defaultNixPlan nixBuildInfo rh services folders mpostgres = do
+defaultNixPlan :: DeployOptions -> Task ()
+defaultNixPlan opts@DeployOptions{..} = do
+  let nixBuildInfo = getNixBuildInfo opts
+      rh = getRemoteHost opts
   aptPackages rh ["curl"]
   let deployUser = "deploy"
   addUser rh deployUser
@@ -177,12 +186,15 @@ defaultNixPlan nixBuildInfo rh services folders mpostgres = do
   derivs <- nixBuild nixBuildInfo
   liftShell "Print derivs" () $ mapM_ (echo . toTextIgnore) derivs
   nixCopyClosures rh deployUser derivs
-  traverse_ (\f -> ensureRemoteFolder rh f "root") folders
-  whenJust mpostgres $ \derivSqlName -> do
+  traverse_ (\f -> ensureRemoteFolder rh f "root") deployFolders
+  whenJust deployPostgres $ \derivSqlName -> do
     derivSql <- nixExtractDeriv nixBuildInfo derivSqlName
     installPostgres rh derivSql
-  for_ services $ \serviceName -> do
+  for_ deployTools $ \serviceName -> do
     service <- nixExtractDeriv nixBuildInfo serviceName
-    nixSymlinkService rh service serviceName
+    nixSymlinkService rh service serviceName False
+  for_ deployServices $ \serviceName -> do
+    service <- nixExtractDeriv nixBuildInfo serviceName
+    nixSymlinkService rh service serviceName True
     restartRemoteService rh serviceName
   pure ()
