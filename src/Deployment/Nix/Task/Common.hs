@@ -3,6 +3,7 @@ module Deployment.Nix.Task.Common(
   , NixBuildInfo(..)
   , dontReverse
   , applyReverse
+  , bracketReverse
   , sshAgent
   , remoteHostTarget
   , shellRemoteSSH
@@ -86,6 +87,16 @@ applyReverse defVal t = case t of
     }
   TaskApplicative fa ta -> TaskApplicative (dontReverse fa) (dontReverse ta)
   TaskMonadic ta fa -> TaskMonadic (dontReverse ta) (fmap dontReverse fa)
+
+-- | Wrap with apply and reverse action of first tast the actions of second task
+--
+-- TODO: use exception safe bracket
+bracketReverse :: Task a -> Task b -> Task b
+bracketReverse ta tb = do
+  a <- ta
+  b <- tb
+  applyReverse a ta
+  pure b
 
 -- | Start ssh-agent and add given ('Nothing' means default) key with given timeout
 --

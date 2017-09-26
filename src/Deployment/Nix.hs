@@ -67,7 +67,7 @@ getRemoteHost DeployOptions{..} = RemoteHost deployHost deployPort deployUser
 runDeployment :: DeployOptions -> Task a -> IO ()
 runDeployment o@DeployOptions{..} buildPlan =
   void $ keep' $ case deployCommand of
-    CommandDeploy{..} -> 
+    CommandDeploy{..} ->
       if deployDry then do
           infos <- dryRunTask buildPlan
           shelly . echo $ T.unlines $ (\(mn, b) -> fromMaybe "unnamed" mn <> " is " <> if b then "applied" else "not applied" ) <$> infos
@@ -190,29 +190,27 @@ defaultNixPlan opts@DeployOptions{..} = do
     loadKeys = if null deployKeys
       then sshAgent deployKeysTimeout Nothing
       else traverse_ (sshAgent deployKeysTimeout . Just . fromText) deployKeys
-  loadKeys
-  aptPackages rh ["curl"]
-  let deployUser = "deploy"
-  addUser rh deployUser
-  installNix rh deployUser
-  nixCreateProfile rh deployUser
-  makeNixLinks rh deployUser
-  dontReverse genNixSignKeys
-  copyNixSignKeys rh
-  copyDeploySshKeys rh deployUser
-  derivs <- nixBuild nixBuildInfo
-  liftShell "Print derivs" () $ mapM_ (echo . toTextIgnore) derivs
-  nixCopyClosures rh deployUser derivs
-  traverse_ (\f -> ensureRemoteFolder rh f "root") deployFolders
-  whenJust deployPostgres $ \derivSqlName -> do
-    derivSql <- nixExtractDeriv nixBuildInfo derivSqlName
-    installPostgres rh derivSql
-  for_ deployTools $ \serviceName -> do
-    service <- nixExtractDeriv nixBuildInfo serviceName
-    nixSymlinkService rh service serviceName False
-  for_ deployServices $ \serviceName -> do
-    service <- nixExtractDeriv nixBuildInfo serviceName
-    nixSymlinkService rh service serviceName True
-    restartRemoteService rh serviceName
-  applyReverse () loadKeys
-  pure ()
+  bracketReverse loadKeys $ do
+    aptPackages rh ["curl"]
+    let deployUser = "deploy"
+    addUser rh deployUser
+    installNix rh deployUser
+    nixCreateProfile rh deployUser
+    makeNixLinks rh deployUser
+    dontReverse genNixSignKeys
+    copyNixSignKeys rh
+    copyDeploySshKeys rh deployUser
+    derivs <- nixBuild nixBuildInfo
+    liftShell "Print derivs" () $ mapM_ (echo . toTextIgnore) derivs
+    nixCopyClosures rh deployUser derivs
+    traverse_ (\f -> ensureRemoteFolder rh f "root") deployFolders
+    whenJust deployPostgres $ \derivSqlName -> do
+      derivSql <- nixExtractDeriv nixBuildInfo derivSqlName
+      installPostgres rh derivSql
+    for_ deployTools $ \serviceName -> do
+      service <- nixExtractDeriv nixBuildInfo serviceName
+      nixSymlinkService rh service serviceName False
+    for_ deployServices $ \serviceName -> do
+      service <- nixExtractDeriv nixBuildInfo serviceName
+      nixSymlinkService rh service serviceName True
+      restartRemoteService rh serviceName
