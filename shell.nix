@@ -6,5 +6,6 @@ in pkgs.stdenv.mkDerivation {
 
   buildInputs = [
     nixdeploy
+    pkgs.x11_ssh_askpass
   ];
 }

@@ -12,5 +12,4 @@ nix:
     - git
     - libssh
     - openssh
-    - postgresql
     - zlib

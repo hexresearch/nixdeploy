@@ -35,6 +35,8 @@ data DeployOptions = DeployOptions {
 , deployHost          :: Text
 , deployNixFile       :: Text -- ^ Path to .nix file with derivations that need to be deployed
 , deployNixSshConfig  :: Maybe Text -- ^ Path to ssh-config to use for nix-build
+, deployKeys          :: [Text] -- ^ Which ssh keys to add to ssh-agent
+, deployKeysTimeout   :: Maybe Int -- ^ Number of seconds for `deployKeys` to expire
 , deployPort          :: Int -- ^ ssh port
 , deployUser          :: Text
 , deployServices      :: [Text] -- ^ Names of derivations in `deployNixFile` that are symlinked to /etc/systemd/system
@@ -63,9 +65,9 @@ getRemoteHost DeployOptions{..} = RemoteHost deployHost deployPort deployUser
 
 -- | Execute program with given options
 runDeployment :: DeployOptions -> Task a -> IO ()
-runDeployment o@DeployOptions{..} buildPlan = do
+runDeployment o@DeployOptions{..} buildPlan =
   void $ keep' $ case deployCommand of
-    CommandDeploy{..} -> do
+    CommandDeploy{..} -> 
       if deployDry then do
           infos <- dryRunTask buildPlan
           shelly . echo $ T.unlines $ (\(mn, b) -> fromMaybe "unnamed" mn <> " is " <> if b then "applied" else "not applied" ) <$> infos
@@ -97,6 +99,16 @@ deployOptionsParser = DeployOptions
        long "nix-ssh-config"
     <> metavar "NIX_SSH_CONFIG"
     <> help "Which ssh config to use with nix-build"
+    )
+  <*> (many . textOption) (
+       long "key"
+    <> metavar "SSH_PRIVATE_KEY_PATH"
+    <> help "Path to encrypted private key that will be added to ssh-agent"
+    )
+  <*> (optional . option auto) (
+       long "keys-timeout"
+    <> metavar "INT_SECONDS"
+    <> help "Number of seconds the ssh keys will expired after"
     )
   <*> option auto (
        long "port"
@@ -172,8 +184,13 @@ whenJust (Just a) f = f a
 -- | Plan to build nix project and deploy it on remote host
 defaultNixPlan :: DeployOptions -> Task ()
 defaultNixPlan opts@DeployOptions{..} = do
-  let nixBuildInfo = getNixBuildInfo opts
-      rh = getRemoteHost opts
+  let
+    nixBuildInfo = getNixBuildInfo opts
+    rh = getRemoteHost opts
+    loadKeys = if null deployKeys
+      then sshAgent deployKeysTimeout Nothing
+      else traverse_ (sshAgent deployKeysTimeout . Just . fromText) deployKeys
+  loadKeys
   aptPackages rh ["curl"]
   let deployUser = "deploy"
   addUser rh deployUser
@@ -197,4 +214,5 @@ defaultNixPlan opts@DeployOptions{..} = do
     service <- nixExtractDeriv nixBuildInfo serviceName
     nixSymlinkService rh service serviceName True
     restartRemoteService rh serviceName
+  applyReverse () loadKeys
   pure ()

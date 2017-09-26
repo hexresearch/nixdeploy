@@ -1,9 +1,11 @@
 module Deployment.Nix.Task.Common(
     RemoteHost(..)
   , NixBuildInfo(..)
+  , dontReverse
+  , applyReverse
+  , sshAgent
   , remoteHostTarget
   , shellRemoteSSH
-  , dontReverse
   , aptPackages
   , addUser
   , installNix
@@ -67,6 +69,54 @@ dontReverse t = case t of
     }
   TaskApplicative fa ta -> TaskApplicative (dontReverse fa) (dontReverse ta)
   TaskMonadic ta fa -> TaskMonadic (dontReverse ta) (fmap dontReverse fa)
+
+-- | Apply reverse action of the task in normal (not backtracking) mode. Usefull
+-- for cleanup.
+applyReverse :: a -- ^ Value that will be returned after reverse script
+  -> Task a -- ^ Task that contains reverse script
+  -> Task a -- ^ Task that apply script is equals to reverse script and always passes check
+applyReverse defVal t = case t of
+  AtomTask{..} -> AtomTask {
+      taskName = ("Reversed " <>) <$> taskName
+    , taskCheck = do
+        (_, a) <- taskCheck
+        pure (True, a)
+    , taskApply = taskReverse >> pure defVal
+    , taskReverse = taskReverse
+    }
+  TaskApplicative fa ta -> TaskApplicative (dontReverse fa) (dontReverse ta)
+  TaskMonadic ta fa -> TaskMonadic (dontReverse ta) (fmap dontReverse fa)
+
+-- | Start ssh-agent and add given ('Nothing' means default) key with given timeout
+--
+-- Need `openssh-askpass` to be installed in system.
+sshAgent :: Maybe Int -> Maybe FilePath -> Task ()
+sshAgent mseconds mkey = AtomTask {
+  taskName = Just $ "Adding key " <> maybe "id_rsa" toTextArg mkey <> " to ssh-agent"
+, taskCheck = shelly $ errExit False $ do
+    home <- fromText . T.filter (/= '\n') <$> bash "echo" ["$HOME"]
+    hasAgent <- isSshAgentExist
+    pubkeys <- T.lines <$> bash "ssh-add" ["-L"]
+    pubkey <- readfile $ maybe (home <> ".ssh/id_rsa.pub") (<> ".pub") mkey
+    let isKeyLoaded = pubkey `elem` pubkeys
+    pure (not hasAgent || not isKeyLoaded, ())
+, taskApply = shelly $ do
+    hasAgent <- isSshAgentExist
+    unless hasAgent $ bash_ "eval" ["`ssh-agent`"]
+    _ <- bash "ssh-add" $
+         maybe [] (\s -> ["-t", pack $ show s]) mseconds
+      <> maybe [] (\p -> [toTextArg p]) mkey
+    pure ()
+, taskReverse = shelly $ errExit False $ do
+    _ <- bash "ssh-add" $
+      ["-d"] <> maybe [] (\p -> [toTextArg p]) mkey
+    pure ()
+}
+  where
+    isSshAgentExist = errExit False $ do
+      _ <- bash "test" ["-z", "$SSH_AUTH_SOCK"]
+      err1 <- lastExitCode
+      pure $ err1 == 0
 
 -- | Install needed packages
 aptPackages :: RemoteHost -> [Text] -> Task ()
@@ -214,7 +264,6 @@ copyDeploySshKeys rh deployUser = AtomTask {
 , taskApply = shelly $ do
     _ <- shellRemoteSSH rh [("cp", ["-r", "~/.ssh", "/home/" <> deployUser <> "/.ssh"])
       , ("chown", [deployUser, "-R", "/home/" <> deployUser <> "/.ssh"])]
-    -- _ <- errExit False $ shellRemoteSSH rh [("ln", ["/home/" <> deployUser <> "/.profile", "/home/" <> deployUser <> "/.bashrc"])]
     pure ()
 , taskReverse = pure ()
 }
