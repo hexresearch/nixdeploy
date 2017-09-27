@@ -70,7 +70,7 @@ runDeployment o@DeployOptions{..} buildPlan =
     CommandDeploy{..} ->
       if deployDry then do
           infos <- dryRunTask buildPlan
-          shelly . echo $ T.unlines $ (\(mn, b) -> fromMaybe "unnamed" mn <> " is " <> if b then "applied" else "not applied" ) <$> infos
+          liftIO $ traverse_ (\(mn, b) -> echonColor White (fromMaybe "unnamed" mn <> " is ") >> if b then echoColor Green "applied" else echoColor Red "not applied" ) infos
         else void $ executeTask buildPlan
     CommandRevert -> reverseTask buildPlan
 

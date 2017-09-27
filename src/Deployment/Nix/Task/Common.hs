@@ -336,7 +336,7 @@ nixSymlinkService :: RemoteHost -> Text -> Text -> Bool -> Task ()
 nixSymlinkService rh deriv serviceName enable = AtomTask {
     taskName = Just $ "Symlink systemd service " <> serviceName <> " at " <> remoteAddress rh
   , taskCheck = pure (True, ())
-  , taskApply = shelly $ print_commands True $ do
+  , taskApply = shelly $ do
       _ <- errExit False $ shellRemoteSSH rh [("rm", ["-f", servicePath])]
       _ <- shellRemoteSSH rh $
         [ ("cp", [deriv, servicePath])]
