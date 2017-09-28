@@ -5,6 +5,7 @@ module Deployment.Nix.Task.Common(
   , applyReverse
   , bracketReverse
   , sshAgent
+  , withSshKeys
   , remoteHostTarget
   , shellRemoteSSH
   , aptPackages
@@ -15,6 +16,7 @@ module Deployment.Nix.Task.Common(
   , genNixSignKeys
   , copyNixSignKeys
   , copyDeploySshKeys
+  , nixify
   , nixBuild
   , nixCopyClosures
   , nixCreateProfile
@@ -25,6 +27,7 @@ module Deployment.Nix.Task.Common(
   , installPostgres
   ) where
 
+import Data.Foldable (traverse_)
 import Data.Functor
 import Data.Monoid
 import Data.Text (Text, pack, unpack)
@@ -128,6 +131,15 @@ sshAgent mseconds mkey = AtomTask {
       _ <- bash "test" ["-z", "$SSH_AUTH_SOCK"]
       err1 <- lastExitCode
       pure $ err1 == 0
+
+-- | Wrap task with ssh-agent invocation and termination for getting access
+-- for specified ssh keys
+withSshKeys :: Maybe Int -> [Text] -> Task a -> Task a
+withSshKeys deployKeysTimeout deployKeys = bracketReverse loadKeys
+  where
+    loadKeys = if null deployKeys
+      then sshAgent deployKeysTimeout Nothing
+      else traverse_ (sshAgent deployKeysTimeout . Just . fromText) deployKeys
 
 -- | Install needed packages
 aptPackages :: RemoteHost -> [Text] -> Task ()
@@ -385,3 +397,22 @@ installPostgres rh derivSql =  AtomTask {
       _ <- shellRemoteSSH rh [("dpkg", ["--get-selections | grep -q \"^" <> name <> "[[:space:]]*install$\""])]
       err <- lastExitCode
       pure (err /= 0)
+
+-- | Helper that holds tasks for installing nix infrastructure on remote host
+--
+-- This includes:
+-- * User setup
+-- * Sign keys
+-- * Nix installation
+-- * Symlinks for nix binaries
+nixify :: RemoteHost -> Text -> Task ()
+nixify rh deployUser = do
+  aptPackages rh ["curl"]
+  let deployUser = "deploy"
+  addUser rh deployUser
+  installNix rh deployUser
+  nixCreateProfile rh deployUser
+  makeNixLinks rh deployUser
+  dontReverse genNixSignKeys
+  copyNixSignKeys rh
+  copyDeploySshKeys rh deployUser

@@ -12,6 +12,7 @@ module Deployment.Nix(
   , deployOptionsParser
   , makeDeploymentCLI
   , defaultNixPlan
+  , nixifyPlan
   ) where
 
 import Data.Foldable (traverse_, for_)
@@ -44,16 +45,17 @@ data DeployOptions = DeployOptions {
                                 -- They are usually a one-shot systemd units for administrative tools.
 , deployFolders       :: [Text] -- ^ Set of folders that we need to create on remote machine
 , deployPostgres      :: Maybe Text -- ^ Path to deriviation with SQL init script
+, deployDry           :: Bool -- ^ Only print wich tasks need to be deployed
 }
 
 -- | Available CLI commands to perform
 data Command =
     -- | Execute deployment tasks
-    CommandDeploy {
-      deployDry           :: Bool -- ^ Only print wich tasks need to be deployed
-    }
+      CommandDeploy
     -- | Revert deployment, restore machine state
     | CommandRevert
+    -- | Install nix infrastructure only
+    | CommandNixify
 
 -- | Extract nix build info from options
 getNixBuildInfo :: DeployOptions -> NixBuildInfo
@@ -65,14 +67,15 @@ getRemoteHost DeployOptions{..} = RemoteHost deployHost deployPort deployUser
 
 -- | Execute program with given options
 runDeployment :: DeployOptions -> Task a -> IO ()
-runDeployment o@DeployOptions{..} buildPlan =
+runDeployment o@DeployOptions{..} buildPlan = do
+  let dryRun ma = do
+        infos <- dryRunTask ma
+        liftIO $ traverse_ (\(mn, b) -> echonColor White (fromMaybe "unnamed" mn <> " is ") >> if b then echoColor Green "applied" else echoColor Red "not applied" ) infos
   void $ keep' $ case deployCommand of
-    CommandDeploy{..} ->
-      if deployDry then do
-          infos <- dryRunTask buildPlan
-          liftIO $ traverse_ (\(mn, b) -> echonColor White (fromMaybe "unnamed" mn <> " is ") >> if b then echoColor Green "applied" else echoColor Red "not applied" ) infos
-        else void $ executeTask buildPlan
-    CommandRevert -> reverseTask buildPlan
+    CommandDeploy ->
+      if deployDry then dryRun buildPlan else void $ executeTask buildPlan
+    CommandRevert -> if deployDry then dryRun buildPlan else reverseTask buildPlan
+    CommandNixify -> if deployDry then dryRun (nixifyPlan o) else executeTask $ nixifyPlan o
 
 -- | Helper to parse text
 textArgument :: Mod ArgumentFields String -> Parser Text
@@ -146,17 +149,19 @@ deployOptionsParser = DeployOptions
     <> metavar "SQL_DERIVATION"
     <> help "If specified, install postgres and feed the given derivation from .nix file as init SQL script"
     )
+  <*> switch (
+       long "dry"
+    <> short 'd'
+    <> help "Print steps to perform only"
+    )
   where
     cliCommand = subparser $
          command "deploy" (info (deployCmd <**> helper) $ progDesc "Apply deployment to remote host")
       <> command "revert" (info (revertCmd <**> helper) $ progDesc "Reverse deployment at remote host")
-    deployCmd = CommandDeploy
-      <$> switch (
-           long "dry"
-        <> short 'd'
-        <> help "Print steps to perform only"
-        )
+      <> command "nixify" (info (nixifyCmd <**> helper) $ progDesc "Install nix infrastructure on remote host")
+    deployCmd = pure CommandDeploy
     revertCmd = pure CommandRevert
+    nixifyCmd = pure CommandNixify
 
 -- | Generate CLI application for deployment with given build plan
 makeDeploymentCLI :: Parser a -- ^ CLI parser
@@ -181,25 +186,23 @@ whenJust :: Applicative f => Maybe a -> (a -> f ()) -> f ()
 whenJust Nothing _ = pure ()
 whenJust (Just a) f = f a
 
+-- | Build plan that infest remote host with nix and no more
+nixifyPlan :: DeployOptions -> Task ()
+nixifyPlan opts@DeployOptions{..} = do
+  let
+    rh = getRemoteHost opts
+    deployUser = "deploy"
+  withSshKeys deployKeysTimeout deployKeys $ nixify rh deployUser
+
 -- | Plan to build nix project and deploy it on remote host
 defaultNixPlan :: DeployOptions -> Task ()
 defaultNixPlan opts@DeployOptions{..} = do
   let
     nixBuildInfo = getNixBuildInfo opts
     rh = getRemoteHost opts
-    loadKeys = if null deployKeys
-      then sshAgent deployKeysTimeout Nothing
-      else traverse_ (sshAgent deployKeysTimeout . Just . fromText) deployKeys
-  bracketReverse loadKeys $ do
-    aptPackages rh ["curl"]
-    let deployUser = "deploy"
-    addUser rh deployUser
-    installNix rh deployUser
-    nixCreateProfile rh deployUser
-    makeNixLinks rh deployUser
-    dontReverse genNixSignKeys
-    copyNixSignKeys rh
-    copyDeploySshKeys rh deployUser
+    deployUser = "deploy"
+  withSshKeys deployKeysTimeout deployKeys $ do
+    nixify rh deployUser
     derivs <- nixBuild nixBuildInfo
     liftShell "Print derivs" () $ mapM_ (echo . toTextIgnore) derivs
     nixCopyClosures rh deployUser derivs
