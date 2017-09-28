@@ -123,7 +123,7 @@ sshAgent mseconds mkey = AtomTask {
     pure ()
 , taskReverse = shelly $ errExit False $ do
     _ <- bash "ssh-add" $
-      ["-d"] <> maybe [] (\p -> [toTextArg p]) mkey
+      ["-d"] <> maybe [] (\p -> [toTextArg p]) mkey <> [" > /dev/null 2>&1"]
     pure ()
 }
   where
@@ -177,7 +177,7 @@ addUser :: RemoteHost -> Text -> Task ()
 addUser rh user = AtomTask {
   taskName = Just $ "Creation of user " <> user
 , taskCheck = shelly $ errExit False $ do
-    _ <- shellRemoteSSH rh [("id", ["-u", user])]
+    _ <- shellRemoteSSH rh [("id", ["-u", user <> " > /dev/null 2>&1"])]
     err <- lastExitCode
     pure (err /= 0, ())
 , taskApply = void $ shelly $
@@ -192,7 +192,7 @@ installNix :: RemoteHost -> Text -> Task ()
 installNix rh deployUser = AtomTask {
   taskName = Just "Installation of nix package manager"
 , taskCheck = shelly $ errExit False $ do
-    _ <- shellRemoteSSH rh [raiseNixEnv deployUser, ("which", ["nix-build"])]
+    _ <- shellRemoteSSH rh [raiseNixEnv deployUser, ("which", ["nix-build > /dev/null 2>&1"])]
     err <- lastExitCode
     pure (err /= 0, ())
 , taskApply = void $ shelly $
