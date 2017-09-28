@@ -46,6 +46,7 @@ data DeployOptions = DeployOptions {
 , deployFolders       :: [Text] -- ^ Set of folders that we need to create on remote machine
 , deployPostgres      :: Maybe Text -- ^ Path to deriviation with SQL init script
 , deployDry           :: Bool -- ^ Only print wich tasks need to be deployed
+, deployVerbose       :: Bool -- ^ Verbose output from shell
 }
 
 -- | Available CLI commands to perform
@@ -71,11 +72,15 @@ runDeployment o@DeployOptions{..} buildPlan = do
   let dryRun ma = do
         infos <- dryRunTask ma
         liftIO $ traverse_ (\(mn, b) -> echonColor White (fromMaybe "unnamed" mn <> " is ") >> if b then echoColor Green "applied" else echoColor Red "not applied" ) infos
-  void $ keep' $ case deployCommand of
-    CommandDeploy ->
-      if deployDry then dryRun buildPlan else void $ executeTask buildPlan
-    CommandRevert -> if deployDry then dryRun buildPlan else reverseTask buildPlan
-    CommandNixify -> if deployDry then dryRun (nixifyPlan o) else executeTask $ nixifyPlan o
+  void $ keep' $ do
+    setShellOptions ShellOptions {
+        shellVerbose = deployVerbose
+      }
+    case deployCommand of
+      CommandDeploy ->
+        if deployDry then dryRun buildPlan else void $ executeTask buildPlan
+      CommandRevert -> if deployDry then dryRun buildPlan else reverseTask buildPlan
+      CommandNixify -> if deployDry then dryRun (nixifyPlan o) else executeTask $ nixifyPlan o
 
 -- | Helper to parse text
 textArgument :: Mod ArgumentFields String -> Parser Text
@@ -153,6 +158,11 @@ deployOptionsParser = DeployOptions
        long "dry"
     <> short 'd'
     <> help "Print steps to perform only"
+    )
+  <*> switch (
+       long "verbose"
+    <> short 'v'
+    <> help "Verbose output including from shell commands"
     )
   where
     cliCommand = subparser $

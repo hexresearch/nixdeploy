@@ -4,6 +4,10 @@ module Deployment.Nix.Task(
   , reverseTask
   , dryRunTask
   , liftShell
+  -- * Helpers for task developing
+  , ShellOptions(..)
+  , setShellOptions
+  , transShell
   -- * Color helpers
   , echonColor
   , echoColor
@@ -73,9 +77,25 @@ liftShell :: Text -> a -> Sh a -> Task a
 liftShell name a0 ma = AtomTask {
     taskName = Just name
   , taskCheck = pure (True, a0)
-  , taskApply = shelly ma
+  , taskApply = transShell ma
   , taskReverse = pure ()
   }
+
+-- | Special settings for shell execution
+data ShellOptions = ShellOptions {
+  shellVerbose :: Bool -- ^ Execute shell in verbose mode ?
+}
+
+-- | Set shell options to use when embedding shell in tasks
+setShellOptions :: ShellOptions -> TransIO ()
+setShellOptions = setData
+
+-- | Execute shell inside task atom body with prefered settings (silence, verbos, trace, etc)
+transShell :: Sh a -> TransIO a
+transShell ma = do
+  ShellOptions{..} <- getSData
+  let vb = if shellVerbose then verbosely else silently
+  shelly $ vb $ ma
 
 -- | Apply effects only when encounter 'Just'
 whenJust :: Applicative f => Maybe a -> (a -> f ()) -> f ()
