@@ -21,6 +21,7 @@ import Data.Maybe
 import Data.Monoid
 import Data.Text (Text, pack, unpack)
 import Options.Applicative
+import Safe (headMay)
 import Shelly hiding (command)
 import System.FilePath (takeFileName)
 import Transient.Base hiding (option)
@@ -221,7 +222,7 @@ defaultNixPlan opts@DeployOptions{..} = do
     nixify rh deployUser
     derivs <- nixBuild nixBuildInfo
     liftShell "Print derivs" () $ mapM_ (echo . toTextIgnore) derivs
-    nixCopyClosures rh deployUser derivs
+    nixCopyClosures rh (headMay deployKeys) deployUser derivs
     traverse_ (\f -> ensureRemoteFolder rh f "root") deployFolders
     whenJust deployPostgres $ \derivSqlName -> do
       derivSql <- nixExtractDeriv nixBuildInfo derivSqlName
