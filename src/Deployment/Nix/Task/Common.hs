@@ -300,12 +300,14 @@ copyDeploySshKeys rh deployUser = AtomTask {
   taskName = Just $ "Copy SSH keys for user " <> deployUser
 , taskCheck = pure (True, ())
 , taskApply = transShell $ do
+    let home user = if user == "root" then "/root" else "/home/" <> user
     _ <- shellRemoteSSH rh [
-        sudo ("cp", ["-r", "/home/" <> remoteUser rh <> "/.ssh", "/home/" <> deployUser <> "/.ssh"])
-      , sudo ("chown", [deployUser, "-R", "/home/" <> deployUser <> "/.ssh"])]
+        sudo ("cp", ["-r", home (remoteUser rh) <> "/.ssh", home deployUser <> "/.ssh"])
+      , sudo ("chown", [deployUser, "-R", home deployUser <> "/.ssh"])]
     pure ()
 , taskReverse = pure ()
 }
+  where
 
 -- | Sign, copy and install nix closures on remote host, need ability to ssh to deployUser
 nixCopyClosures :: RemoteHost -> Maybe Text -> Text -> [FilePath] -> Task ()
@@ -315,7 +317,7 @@ nixCopyClosures rh mkey deployUser closures = AtomTask {
   , taskApply = transShell $ do
       let keyArg = maybe "" (\key -> " -i \"" <> key <> "\"'") mkey
       let sshOpts = "NIX_SSHOPTS='-p " <> pack (show $ remotePort rh) <> keyArg
-      _ <- bash (fromText sshOpts) $ ["nix-copy-closure", "--sign", "--gzip", "--to", remoteHostTarget rh { remoteUser = deployUser }]  ++ fmap toTextArg closures
+      _ <- escaping False $ run_ (fromText sshOpts) $ ["nix-copy-closure", "--sign", "--gzip", "--to", remoteHostTarget rh { remoteUser = deployUser }]  ++ fmap toTextArg closures
       let installProfile closure = sudoFrom deployUser ("nix-env", ["-p /opt/deploy/profile", "-i", toTextArg closure])
       _ <- shellRemoteSSH rh $ raiseNixEnv deployUser : fmap installProfile closures
       pure ()
