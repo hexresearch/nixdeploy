@@ -115,14 +115,15 @@ echoColor :: (MonadIO m, MonadMask m) => Color -> Text -> m ()
 echoColor c = withSGR [SetConsoleIntensity BoldIntensity, SetColor Foreground Vivid c] . liftIO . T.putStrLn
 
 -- | Apply task if needed
-executeTask :: forall a . Task a -> TransIO a
-executeTask = go
+executeTask :: forall a . Bool -> Task a -> TransIO a
+executeTask needForce = go
   where
     go :: Task b -> TransIO b
     go t = case t of
       AtomTask{..} -> do
         whenJust taskName $ \nm -> liftIO $ echonColor White $ "Checking task " <> nm <> "... "
-        (needApply, a) <- taskCheck
+        (checkResult, a) <- taskCheck
+        let needApply = needForce || checkResult
         whenJust taskName $ \nm -> liftIO $ if needApply then echoColor Red "need apply" else echoColor Green "ok"
         if needApply then do
             whenJust taskName $ \nm -> liftIO $ echoColor White $ "Applying task " <> nm

@@ -47,6 +47,7 @@ data DeployOptions = DeployOptions {
 , deployPostgres      :: Maybe Text -- ^ Path to deriviation with SQL init script
 , deployDry           :: Bool -- ^ Only print wich tasks need to be deployed
 , deployVerbose       :: Bool -- ^ Verbose output from shell
+, deployForce         :: Bool -- ^ When enabled, force all checks to apply tasks
 }
 
 -- | Available CLI commands to perform
@@ -78,9 +79,9 @@ runDeployment o@DeployOptions{..} buildPlan = do
       }
     case deployCommand of
       CommandDeploy ->
-        if deployDry then dryRun buildPlan else void $ executeTask buildPlan
+        if deployDry then dryRun buildPlan else void $ executeTask deployForce buildPlan
       CommandRevert -> if deployDry then dryRun buildPlan else reverseTask buildPlan
-      CommandNixify -> if deployDry then dryRun (nixifyPlan o) else executeTask $ nixifyPlan o
+      CommandNixify -> if deployDry then dryRun (nixifyPlan o) else executeTask deployForce $ nixifyPlan o
 
 -- | Helper to parse text
 textArgument :: Mod ArgumentFields String -> Parser Text
@@ -163,6 +164,11 @@ deployOptionsParser = DeployOptions
        long "verbose"
     <> short 'v'
     <> help "Verbose output including from shell commands"
+    )
+  <*> switch (
+       long "force"
+    <> short 'f'
+    <> help "Force all checks to 'need to apply'"
     )
   where
     cliCommand = subparser $
