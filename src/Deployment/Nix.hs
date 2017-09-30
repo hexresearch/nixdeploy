@@ -49,6 +49,7 @@ data DeployOptions = DeployOptions {
 , deployDry           :: Bool -- ^ Only print wich tasks need to be deployed
 , deployVerbose       :: Bool -- ^ Verbose output from shell
 , deployForce         :: Bool -- ^ When enabled, force all checks to apply tasks
+, deployBackend       :: Backend -- ^ Which backend to use on remote host
 }
 
 -- | Available CLI commands to perform
@@ -69,10 +70,10 @@ getRemoteHost :: DeployOptions -> RemoteHost
 getRemoteHost DeployOptions{..} = RemoteHost deployHost deployPort deployUser
 
 -- | Execute program with given options
-runDeployment :: DeployOptions -> Task a -> IO ()
+runDeployment :: DeployOptions -> Task () -> IO ()
 runDeployment o@DeployOptions{..} buildPlan = do
   let dryRun ma = do
-        infos <- dryRunTask ma
+        infos <- dryRunTask deployBackend ma
         liftIO $ traverse_ (\(mn, b) -> echonColor White (fromMaybe "unnamed" mn <> " is ") >> if b then echoColor Green "applied" else echoColor Red "not applied" ) infos
   void $ keep' $ do
     setShellOptions ShellOptions {
@@ -80,9 +81,9 @@ runDeployment o@DeployOptions{..} buildPlan = do
       }
     case deployCommand of
       CommandDeploy ->
-        if deployDry then dryRun buildPlan else void $ executeTask deployForce buildPlan
-      CommandRevert -> if deployDry then dryRun buildPlan else reverseTask buildPlan
-      CommandNixify -> if deployDry then dryRun (nixifyPlan o) else executeTask deployForce $ nixifyPlan o
+        if deployDry then dryRun buildPlan else void $ executeTask deployForce deployBackend buildPlan
+      CommandRevert -> if deployDry then dryRun buildPlan else reverseTask deployBackend buildPlan
+      CommandNixify -> if deployDry then dryRun (nixifyPlan o) else executeTask deployForce deployBackend $ nixifyPlan o
 
 -- | Helper to parse text
 textArgument :: Mod ArgumentFields String -> Parser Text
@@ -170,6 +171,11 @@ deployOptionsParser = DeployOptions
        long "force"
     <> short 'f'
     <> help "Force all checks to 'need to apply'"
+    )
+  <*> option auto (
+       long "backend"
+    <> short 'b'
+    <> help "Which command set to use, possible values: Ubuntu, Debian."
     )
   where
     cliCommand = subparser $
