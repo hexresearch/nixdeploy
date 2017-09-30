@@ -315,8 +315,8 @@ nixCopyClosures rh mkey deployUser closures = AtomTask {
     taskName = Just $ "Copy closures to " <> remoteAddress rh
   , taskCheck = const $ pure (True, ())
   , taskApply = const $ transShell $ do
-      let keyArg = maybe "" (\key -> " -i \"" <> key <> "\"'") mkey
-      let sshOpts = "NIX_SSHOPTS='-p " <> pack (show $ remotePort rh) <> keyArg
+      let keyArg = maybe "" (\key -> " -i \"" <> key <> "\"") mkey
+      let sshOpts = "NIX_SSHOPTS='-p " <> pack (show $ remotePort rh) <> keyArg <> "'"
       _ <- escaping False $ run_ (fromText sshOpts) $ ["nix-copy-closure", "--sign", "--gzip", "--to", remoteHostTarget rh { remoteUser = deployUser }]  ++ fmap toTextArg closures
       let installProfile closure = sudoFrom deployUser ("nix-env", ["-p /opt/deploy/profile", "-i", toTextArg closure])
       _ <- shellRemoteSSH rh $ raiseNixEnv deployUser : fmap installProfile closures
