@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 module Deployment.Nix(
     DeployOptions(..)
@@ -40,7 +41,7 @@ data DeployOptions = DeployOptions {
 , deployKeys          :: [Text] -- ^ Which ssh keys to add to ssh-agent
 , deployKeysTimeout   :: Maybe Int -- ^ Number of seconds for `deployKeys` to expire
 , deployPort          :: Int -- ^ ssh port
-, deployUser          :: Text
+, deployUser          :: Maybe Text
 , deployServices      :: [Text] -- ^ Names of derivations in `deployNixFile` that are symlinked to /etc/systemd/system
 , deployTools         :: [Text] -- ^ Names of derivations in `deployNixFile` that are symlinked to /etc/systemd/system, but not enabled.
                                 -- They are usually a one-shot systemd units for administrative tools.
@@ -67,11 +68,18 @@ getNixBuildInfo DeployOptions{..} = NixBuildInfo (fromText deployNixFile) (fromT
 
 -- | Extract remote host info from options
 getRemoteHost :: DeployOptions -> RemoteHost
-getRemoteHost DeployOptions{..} = RemoteHost deployHost deployPort deployUser
+getRemoteHost DeployOptions{..} = RemoteHost deployHost deployPort (fromMaybe "root" deployUser)
+
+-- | Patch options to match backend specifics
+patchBackendOptions :: DeployOptions -> DeployOptions
+patchBackendOptions opts = case deployBackend opts of
+  Debian -> opts { deployUser = maybe (Just "admin") Just . deployUser $ opts }
+  _ -> opts
 
 -- | Execute program with given options
 runDeployment :: DeployOptions -> Task () -> IO ()
-runDeployment o@DeployOptions{..} buildPlan = do
+runDeployment rawOpts buildPlan = do
+  let o@DeployOptions{..} = patchBackendOptions rawOpts
   let dryRun ma = do
         infos <- dryRunTask deployBackend ma
         liftIO $ traverse_ (\(mn, b) -> echonColor White (fromMaybe "unnamed" mn <> " is ") >> if b then echoColor Green "applied" else echoColor Red "not applied" ) infos
@@ -129,13 +137,11 @@ deployOptionsParser = DeployOptions
     <> value 22
     <> help "Default SSH port"
   )
-  <*> textOption (
+  <*> (optional . textOption) (
        long "user"
     <> short 'u'
     <> metavar "DEPLOY_USER"
-    <> showDefault
-    <> value "root"
-    <> help "Which user to deploy with"
+    <> help "Which user to deploy with (default is root or admin for Debian)"
     )
   <*> (many . textOption) (
        long "service"
