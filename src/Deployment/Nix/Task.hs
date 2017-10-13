@@ -23,15 +23,12 @@ import Data.Foldable (traverse_)
 import Data.Maybe
 import Data.Monoid
 import Data.Text (Text, pack)
+import Deployment.Nix.Config
 import Shelly
 import System.Console.ANSI
 import Transient.Base
 
 import qualified Data.Text.IO as T
-
--- | Enumeration of supported backends
-data Backend = Ubuntu | Debian
-  deriving (Eq, Ord, Show, Read)
 
 -- | Reversable task on remote machine
 data Task a where

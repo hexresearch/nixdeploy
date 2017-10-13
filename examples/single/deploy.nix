@@ -53,7 +53,7 @@ let
 in {
   # General deployment options
   deployment.user = "deploy"; # Which user will own /nix and profile
-  # Description of each remote machine 
+  # Description of each remote machine
   machines = {
     testMachine = { # Single machine to deploy
       host = testMachineHost; # Host of machine to connect to via SSH
@@ -65,7 +65,7 @@ in {
           enable = true; # auto-start?
         };
       };
-      folders = [ { # Folders to create, doesn't touch existing folders
+      directories = [ { # Folders to create, doesn't touch existing folders
           path = "/var/log/dante";
           owner = "root"; # default is deployment user
         }
