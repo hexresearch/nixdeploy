@@ -7,4 +7,4 @@ import Prelude hiding (FilePath)
 import Shelly hiding (command)
 
 main :: IO ()
-main = makeDeploymentCLI deployOptionsParser id defaultNixPlan
+main = makeDeploymentCLI deployOptionsParser id $ const $ defaultNixPlan False

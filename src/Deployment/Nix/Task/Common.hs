@@ -31,6 +31,7 @@ import Data.Foldable (traverse_)
 import Data.Functor
 import Data.Monoid
 import Data.Text (Text, pack, unpack)
+import Deployment.Nix.Config
 import Deployment.Nix.Task
 import Filesystem.Path (addExtensions)
 import Prelude hiding (FilePath)
@@ -105,14 +106,13 @@ bracketReverse ta tb = do
 -- | Start ssh-agent and add given ('Nothing' means default) key with given timeout
 --
 -- Need `openssh-askpass` to be installed in system.
-sshAgent :: Maybe Int -> Maybe FilePath -> Task ()
-sshAgent mseconds mkey = AtomTask {
-  taskName = Just $ "Adding key " <> maybe "id_rsa" toTextArg mkey <> " to ssh-agent"
+sshAgent :: Maybe Int -> KeyPath -> Task ()
+sshAgent mseconds key = AtomTask {
+  taskName = Just $ "Adding key " <> pack (unConfigPath key) <> " to ssh-agent"
 , taskCheck = transShell $ errExit False $ do
-    home <- fromText . T.filter (/= '\n') <$> bash "echo" ["$HOME"]
     hasAgent <- isSshAgentExist
     pubkeys <- T.lines <$> bash "ssh-add" ["-L"]
-    pubkey <- readfile $ maybe (home <> ".ssh/id_rsa.pub") (flip addExtensions ["pub"]) mkey
+    pubkey <- readfile $ addExtensions (fromText . pack . unConfigPath $ key) ["pub"]
     let isKeyLoaded = pubkey `elem` pubkeys
     pure (not hasAgent || not isKeyLoaded, ())
 , taskApply = transShell $ do
@@ -120,11 +120,11 @@ sshAgent mseconds mkey = AtomTask {
     unless hasAgent $ bash_ "eval" ["`ssh-agent`"]
     _ <- bash "ssh-add" $
          maybe [] (\s -> ["-t", pack $ show s]) mseconds
-      <> maybe [] (\p -> [toTextArg p]) mkey
+      <> [toTextArg . unConfigPath $ key]
     pure ()
 , taskReverse = transShell $ errExit False $ do
     _ <- bash "ssh-add" $
-      ["-d"] <> maybe [] (\p -> [toTextArg p]) mkey <> [" > /dev/null 2>&1"]
+      "-d" : (toTextArg . unConfigPath $ key) : [" > /dev/null 2>&1"]
     pure ()
 }
   where
@@ -135,12 +135,10 @@ sshAgent mseconds mkey = AtomTask {
 
 -- | Wrap task with ssh-agent invocation and termination for getting access
 -- for specified ssh keys
-withSshKeys :: Maybe Int -> [Text] -> Task a -> Task a
+withSshKeys :: Maybe Int -> [KeyPath] -> Task a -> Task a
 withSshKeys deployKeysTimeout deployKeys = bracketReverse loadKeys
   where
-    loadKeys = if null deployKeys
-      then sshAgent deployKeysTimeout Nothing
-      else traverse_ (sshAgent deployKeysTimeout . Just . fromText) deployKeys
+    loadKeys = traverse_ (sshAgent deployKeysTimeout) deployKeys
 
 -- | Helper for switching to root after ssh login
 sudo :: (FilePath, [Text]) -> (FilePath, [Text])
@@ -170,16 +168,17 @@ aptPackages rh pkgs = AtomTask {
       pure (err /= 0)
 
 -- | Check that folder on host exist and create if missing
-ensureRemoteFolder :: RemoteHost -> Text -> Text -> Task ()
-ensureRemoteFolder rh folder user = AtomTask {
-  taskName = Just $ "Ensure folder " <> folder <> " at " <> remoteAddress rh
+-- TODO: reassign and recreate flags
+ensureRemoteFolder :: RemoteHost -> DirectoryCfg -> Task ()
+ensureRemoteFolder rh DirectoryCfg{..} = AtomTask {
+  taskName = Just $ "Ensure folder " <> directoryPath <> " at " <> remoteAddress rh
 , taskCheck = transShell $ errExit False $ do
-    _ <- shellRemoteSSH rh [sudo ("ls", [folder <> " > /dev/null 2>&1"])] -- TODO: check that is directory and own user
+    _ <- shellRemoteSSH rh [sudo ("ls", [directoryPath <> " > /dev/null 2>&1"])] -- TODO: check that is directory and own user
     err <- lastExitCode
     pure (err /= 0, ())
-, taskApply = void $ transShell $ shellRemoteSSH rh [
-    sudo ("mkdir", ["-p", folder])
-  , sudo ("chown", ["-R", user, folder])]
+, taskApply = void $ transShell $ shellRemoteSSH rh $
+     [ sudo ("mkdir", ["-p", directoryPath])]
+  <> maybe [] (\user -> [ sudo ("chown", ["-R", user, directoryPath]) ]) directoryOwner
 , taskReverse = pure ()
 }
 
@@ -310,12 +309,12 @@ copyDeploySshKeys rh deployUser = AtomTask {
   where
 
 -- | Sign, copy and install nix closures on remote host, need ability to ssh to deployUser
-nixCopyClosures :: RemoteHost -> Maybe Text -> Text -> [FilePath] -> Task ()
+nixCopyClosures :: RemoteHost -> Maybe KeyPath -> Text -> [DerivationPath] -> Task ()
 nixCopyClosures rh mkey deployUser closures = AtomTask {
     taskName = Just $ "Copy closures to " <> remoteAddress rh
   , taskCheck = pure (True, ())
   , taskApply = transShell $ do
-      let keyArg = maybe "" (\key -> " -i \"" <> key <> "\"") mkey
+      let keyArg = maybe "" (\key -> " -i \"" <> (pack . unConfigPath $ key) <> "\"") mkey
       let sshOpts = "NIX_SSHOPTS='-p " <> pack (show $ remotePort rh) <> keyArg <> "'"
       _ <- escaping False $ run_ (fromText sshOpts) $ ["nix-copy-closure", "--sign", "--gzip", "--to", remoteHostTarget rh { remoteUser = deployUser }]  ++ fmap toTextArg closures
       let installProfile closure = sudoFrom deployUser ("nix-env", ["-p /opt/deploy/profile", "-i", toTextArg closure])

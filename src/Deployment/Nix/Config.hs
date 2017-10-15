@@ -17,6 +17,7 @@ module Deployment.Nix.Config(
   , DirectoryCfg(..)
   , ServiceCfg(..)
   , MachineCfg(..)
+  , machineAllDerivations
   , Config(..)
   -- * Config relative path
   , ConfigPath(..)
@@ -29,6 +30,8 @@ import Data.Aeson.TH
 import Data.Data
 import Data.Generics.Uniplate.Data
 import Data.Map.Strict (Map)
+import Data.Maybe
+import Data.Monoid
 import Data.String
 import Data.Text (Text)
 import Deployment.Nix.Aeson
@@ -116,8 +119,15 @@ data MachineCfg = MachineCfg {
 , machinePort        :: !(Maybe MachinePort)                  -- ^ Machine SSH port
 , machineUser        :: !(Maybe UserName)                     -- ^ Machine SSH user that has passwordless sudo
 , machineServices    :: !(Maybe (Map ServiceName ServiceCfg)) -- ^ Systemd services that should be activated
+, machinePostgres    :: !(Maybe DerivationPath)               -- ^ Install system Postgres and run the init script
 } deriving (Eq, Show, Read, Generic, Data)
 deriveJSON dropPrefixOptions ''MachineCfg
+
+-- | Get list of all deriviations that should be copied on remote machine
+machineAllDerivations :: MachineCfg -> [DerivationPath]
+machineAllDerivations MachineCfg{..} = fromMaybe [] machineDerivations
+  <> maybe [] (pure . foldMap serviceUnit) machineServices
+  <> maybe [] pure machinePostgres
 
 -- | Config file that is generated from the nix description of deployment.
 data Config = Config {
