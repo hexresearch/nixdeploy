@@ -33,12 +33,14 @@ module Deployment.Nix.Task.Common(
 import Data.FileEmbed (embedStringFile)
 import Data.Foldable (traverse_)
 import Data.Functor
+import Data.Maybe
 import Data.Monoid
 import Data.Text (Text, pack, unpack)
 import Deployment.Nix.Config
 import Deployment.Nix.Task
 import Filesystem.Path (addExtensions)
 import Prelude hiding (FilePath)
+import Safe
 import Shelly
 
 import qualified Data.Text as T
@@ -117,7 +119,10 @@ sshAgent mseconds key = AtomTask {
     hasAgent <- isSshAgentExist
     pubkeys <- T.lines <$> bash "ssh-add" ["-L"]
     pubkey <- readfile $ addExtensions (fromText . pack . unConfigPath $ key) ["pub"]
-    let isKeyLoaded = pubkey `elem` pubkeys
+    let getPubHash = headMay . drop 1 . T.splitOn " "
+        isKeyLoaded = case getPubHash pubkey of
+          Nothing -> False
+          Just v -> v `elem` catMaybes (fmap getPubHash pubkeys)
     pure (not hasAgent || not isKeyLoaded, ())
 , taskApply = transShell $ do
     hasAgent <- isSshAgentExist
@@ -135,7 +140,7 @@ sshAgent mseconds key = AtomTask {
     isSshAgentExist = errExit False $ do
       _ <- bash "test" ["-z", "$SSH_AUTH_SOCK"]
       err1 <- lastExitCode
-      pure $ err1 == 0
+      pure $ err1 /= 0
 
 -- | Wrap task with ssh-agent invocation and termination for getting access
 -- for specified ssh keys
