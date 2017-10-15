@@ -1,6 +1,6 @@
 {
   testMachineHost ? "127.0.0.1"
-, testMachinePort ? "22"
+, testMachinePort ? 22
 , testMachineUser ? "root"
 }:
 let

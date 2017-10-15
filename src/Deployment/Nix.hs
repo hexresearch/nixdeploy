@@ -15,18 +15,21 @@ module Deployment.Nix(
   ) where
 
 import Control.Monad.IO.Class
+import Data.Aeson
 import Data.Foldable (traverse_, for_)
 import Data.Functor
 import Data.Maybe
 import Data.Monoid
 import Data.Text (Text, pack, unpack)
+import Data.Text.Encoding
 import Deployment.Nix.Config
 import Options.Applicative
 import Safe (headMay)
 import Shelly hiding (command)
-import System.FilePath (takeFileName)
+import System.FilePath (takeFileName, takeDirectory)
 import Transient.Base hiding (option)
 
+import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 
@@ -38,6 +41,7 @@ data DeployOptions = DeployOptions {
   deployCommand       :: Command
 , deployNixFile       :: Text       -- ^ Path to .nix file with full description of deployment. Config is generated from the nix expression.
 , deployNixArgs       :: [Text]     -- ^ Arguments that are passed to nix deployment file
+, deployNixStrArgs    :: [Text]     -- ^ Arguments that are passed to nix deployment file as Nix string values (you haven't to escape quotes by triple back slash)
 , deployNixSshConfig  :: Maybe Text -- ^ Path to ssh-config to use for nix-build
 , deployDry           :: Bool       -- ^ Only print wich tasks need to be deployed
 , deployVerbose       :: Bool       -- ^ Verbose output from shell
@@ -70,9 +74,14 @@ getDeploymentUser :: Config -> MachineCfg -> UserName
 getDeploymentUser = getDeploymentSmth "deploy" deploymentUser
 
 -- | Calculate user-owner of deployment files with overriding from local machine settings
-getDeploymentKeys :: Config -> MachineCfg -> [KeyPath]
-getDeploymentKeys = getDeploymentSmth ["~/.ssh/id_rsa"] deploymentKeys
--- home <- fromText . T.filter (/= '\n') <$> bash "echo" ["$HOME"]
+getDeploymentKeys :: MonadIO m => Config -> MachineCfg -> m [KeyPath]
+getDeploymentKeys Config{..} MachineCfg{..} = do
+  let mval = (deploymentKeys =<< machineDeployment) <|> deploymentKeys configDeployment
+  case mval of
+    Just val -> pure val
+    Nothing -> do
+      home <- shelly $ T.filter (/= '\n') <$> bash "echo" ["$HOME"]
+      pure [ConfigPath . unpack $ home <> "/.ssh/id_rsa"]
 
 -- | Calculate user-owner of deployment files with overriding from local machine settings
 getDeploymentKeysTimeout :: Config -> MachineCfg -> Int
@@ -80,7 +89,18 @@ getDeploymentKeysTimeout = getDeploymentSmth 300 deploymentKeysTimeout
 
 -- | Transform nix file to desired config
 loadConfig :: MonadIO m => DeployOptions -> m Config
-loadConfig DeployOptions{..} = undefined
+loadConfig DeployOptions{..} = shelly $ do
+  let mkArg prefix v = case T.splitOn ":" v of
+        k : v : _ -> Just $ prefix <> k <> " " <> v
+        _ -> Nothing
+      args = catMaybes $ fmap (mkArg "--arg ") deployNixArgs <> fmap (mkArg "--argstr ") deployNixStrArgs
+      sshArg = maybe [] (\p -> ["-I ssh-config-file=" <> p]) deployNixSshConfig
+  json <- bash "nix-instantiate" (["--json", "--eval", "--strict"] <> sshArg <> args <> [deployNixFile])
+  cfg <- case eitherDecode' . BSL.fromStrict . encodeUtf8 $ json of
+    Left er -> fail $ "Failed when parsing NIX json output: " <> unpack json <> ". Error: " <> er
+    Right v -> pure v
+  let cfgDir = takeDirectory $ unpack deployNixFile
+  absolutize cfgDir cfg
 
 -- | Execute program with given options
 runDeployment :: DeployOptions -> (Config -> Task ()) -> IO ()
@@ -121,8 +141,13 @@ deployOptionsParser = DeployOptions
     )
   <*> (many . textOption) (
        long "arg"
-    <> metavar "Nix file argument in format 'key:value'"
-    <> help "Multiple arguments can be specified. The arguments are passed to NIX_FILE via nix-instantiate --arg option."
+    <> metavar "NIX_KEY_VALUE"
+    <> help "Multiple arguments can be specified. Nix file argument in format 'key:value'. The arguments are passed to NIX_FILE via nix-instantiate --arg option."
+    )
+  <*> (many . textOption) (
+       long "argstr"
+    <> metavar "NIX_KEY_VALUE"
+    <> help "Multiple arguments can be specified. Nix file argument in format 'key:value' with value of fixed Nix string type (you haven't to escape quotes by triple back slash) The arguments are passed to NIX_FILE via nix-instantiate --arg option."
     )
   <*> (optional . textOption) (
        long "nix-ssh-config"
@@ -182,8 +207,8 @@ defaultNixPlan nixifyOnly cfg@Config{..} = for_ configMachines $ \mcfg@MachineCf
   let
     rh = getRemoteHost mcfg
     deployUser = getDeploymentUser cfg mcfg
-    keys = getDeploymentKeys cfg mcfg
     keysTimeout = getDeploymentKeysTimeout cfg mcfg
+  keys <- liftShell "Get keys local path" [] $ getDeploymentKeys cfg mcfg
   withSshKeys (Just keysTimeout) keys $ do
     nixify rh deployUser
     unless nixifyOnly $ do
