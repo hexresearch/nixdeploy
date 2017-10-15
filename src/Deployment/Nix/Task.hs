@@ -1,6 +1,5 @@
 module Deployment.Nix.Task(
-    Backend(..)
-  , Task(..)
+    Task(..)
   , executeTask
   , reverseTask
   , dryRunTask
@@ -39,11 +38,11 @@ data Task a where
       -- | Check that task is need to be applied. 'True' means need to apply, second
       -- value is used as default result of task if no need to apply and as default
       -- value of task on reverse process.
-    , taskCheck   :: Backend -> TransIO (Bool, a)
+    , taskCheck   :: TransIO (Bool, a)
       -- | Apply task
-    , taskApply   :: Backend -> TransIO a
+    , taskApply   :: TransIO a
       -- | Revert task side effects (if possible)
-    , taskReverse :: Backend -> TransIO ()
+    , taskReverse :: TransIO ()
     } -> Task a
   -- | Applicative operation for tasks
   TaskApplicative :: Task (a -> b) -> Task a -> Task b
@@ -54,8 +53,8 @@ instance Functor Task where
   fmap f t = case t of
     AtomTask{..} -> AtomTask {
         taskName = taskName
-      , taskCheck = fmap (fmap f) . taskCheck
-      , taskApply = fmap f . taskApply
+      , taskCheck = fmap f <$> taskCheck
+      , taskApply = f <$> taskApply
       , taskReverse = taskReverse
       }
     TaskApplicative fa ta -> TaskApplicative (fmap f <$> fa) ta
@@ -64,9 +63,9 @@ instance Functor Task where
 instance Applicative Task where
   pure a = AtomTask {
       taskName = Nothing
-    , taskCheck = const $ pure (False, a)
-    , taskApply = const $ pure a
-    , taskReverse = const $ pure ()
+    , taskCheck = pure (False, a)
+    , taskApply = pure a
+    , taskReverse = pure ()
     }
   (<*>) = TaskApplicative
 
@@ -78,9 +77,9 @@ instance Monad Task where
 liftShell :: Text -> a -> Sh a -> Task a
 liftShell name a0 ma = AtomTask {
     taskName = Just name
-  , taskCheck = const $ pure (True, a0)
-  , taskApply = const $ transShell ma
-  , taskReverse = const $ pure ()
+  , taskCheck = pure (True, a0)
+  , taskApply = transShell ma
+  , taskReverse = pure ()
   }
 
 -- | Special settings for shell execution
@@ -117,22 +116,22 @@ echoColor :: (MonadIO m, MonadMask m) => Color -> Text -> m ()
 echoColor c = withSGR [SetConsoleIntensity BoldIntensity, SetColor Foreground Vivid c] . liftIO . T.putStrLn
 
 -- | Apply task if needed
-executeTask :: forall a . Bool -> Backend -> Task a -> TransIO a
-executeTask needForce backend = go
+executeTask :: forall a . Bool -> Task a -> TransIO a
+executeTask needForce = go
   where
     go :: Task b -> TransIO b
     go t = case t of
       AtomTask{..} -> do
         whenJust taskName $ \nm -> liftIO $ echonColor White $ "Checking task " <> nm <> "... "
-        (checkResult, a) <- taskCheck backend
+        (checkResult, a) <- taskCheck
         let needApply = needForce || checkResult
         whenJust taskName $ \nm -> liftIO $ if needApply then echoColor Red "need apply" else echoColor Green "ok"
         if needApply then do
             whenJust taskName $ \nm -> liftIO $ echoColor White $ "Applying task " <> nm
             onException $ \(e :: SomeException) -> do
               whenJust taskName $ \nm -> liftIO $ echoColor White $ "Reversing task " <> nm
-              taskReverse backend
-            taskApply backend
+              taskReverse
+            taskApply
           else pure a
       TaskApplicative fa ta -> do
         f <- go fa
@@ -143,8 +142,8 @@ executeTask needForce backend = go
         go $ fa a
 
 -- | Apply reverse action of task
-reverseTask :: forall a . Backend -> Task a -> TransIO ()
-reverseTask backend t = do
+reverseTask :: forall a . Task a -> TransIO ()
+reverseTask t = do
   (_, ms) <- go t
   forM_ ms $ \(mn, m) -> do
     whenJust mn $ \name -> liftIO $ echoColor White $ "Reversing " <> name
@@ -153,8 +152,8 @@ reverseTask backend t = do
     go :: Task b -> TransIO (b, [(Maybe Text, TransIO ())])
     go t = case t of
       AtomTask{..} -> do
-        (needApply, a) <- taskCheck backend
-        pure $ if needApply then (a, []) else (a, [(taskName, taskReverse backend)])
+        (needApply, a) <- taskCheck
+        pure $ if needApply then (a, []) else (a, [(taskName, taskReverse)])
       TaskApplicative fa ta -> do
         (f, freverses) <- go fa
         (a, areverses) <- go ta
@@ -165,13 +164,13 @@ reverseTask backend t = do
         pure (b, areverses ++ breverses)
 
 -- | Run check actions of task and return list of names, applied or not
-dryRunTask :: forall a . Backend -> Task a -> TransIO [(Maybe Text, Bool)]
-dryRunTask backend = fmap snd . go
+dryRunTask :: forall a . Task a -> TransIO [(Maybe Text, Bool)]
+dryRunTask = fmap snd . go
   where
     go :: Task b -> TransIO (b, [(Maybe Text, Bool)])
     go t = case t of
       AtomTask{..} -> do
-        (needApply, a) <- taskCheck backend
+        (needApply, a) <- taskCheck
         pure (a, [(taskName, not needApply)])
       TaskApplicative fa ta -> do
         (f, freverses) <- go fa

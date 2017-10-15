@@ -21,6 +21,7 @@ import Data.Functor
 import Data.Maybe
 import Data.Monoid
 import Data.Text (Text, pack, unpack)
+import Deployment.Nix.Config
 import Options.Applicative
 import Safe (headMay)
 import Shelly hiding (command)
@@ -35,22 +36,13 @@ import Deployment.Nix.Task.Common as R
 -- | CLI options
 data DeployOptions = DeployOptions {
   deployCommand       :: Command
-, deployHost          :: Text
 , deployNixFile       :: Text -- ^ Path to .nix file with derivations that need to be deployed
+, deployNixArgs       :: [Text] -- ^ Arguments that are passed to nix deployment file
 , deployNixSshConfig  :: Maybe Text -- ^ Path to ssh-config to use for nix-build
-, deployKeys          :: [Text] -- ^ Which ssh keys to add to ssh-agent
-, deployKeysTimeout   :: Maybe Int -- ^ Number of seconds for `deployKeys` to expire
-, deployPort          :: Int -- ^ ssh port
-, deployUser          :: Maybe Text
-, deployServices      :: [Text] -- ^ Names of derivations in `deployNixFile` that are symlinked to /etc/systemd/system
-, deployTools         :: [Text] -- ^ Names of derivations in `deployNixFile` that are symlinked to /etc/systemd/system, but not enabled.
-                                -- They are usually a one-shot systemd units for administrative tools.
-, deployFolders       :: [Text] -- ^ Set of folders that we need to create on remote machine
 , deployPostgres      :: Maybe Text -- ^ Path to deriviation with SQL init script
 , deployDry           :: Bool -- ^ Only print wich tasks need to be deployed
 , deployVerbose       :: Bool -- ^ Verbose output from shell
 , deployForce         :: Bool -- ^ When enabled, force all checks to apply tasks
-, deployBackend       :: Backend -- ^ Which backend to use on remote host
 }
 
 -- | Available CLI commands to perform
@@ -62,26 +54,25 @@ data Command =
     -- | Install nix infrastructure only
     | CommandNixify
 
--- | Extract nix build info from options
-getNixBuildInfo :: DeployOptions -> NixBuildInfo
-getNixBuildInfo DeployOptions{..} = NixBuildInfo (fromText deployNixFile) (fromText <$> deployNixSshConfig)
-
 -- | Extract remote host info from options
-getRemoteHost :: DeployOptions -> RemoteHost
-getRemoteHost DeployOptions{..} = RemoteHost deployHost deployPort (fromMaybe "root" deployUser)
+getRemoteHost :: MachineCfg -> RemoteHost
+getRemoteHost MachineCfg{..} = RemoteHost {
+    remoteAddress = machineHost
+  , remotePort = fromMaybe 22 machinePort
+  , remoteUser = fromMaybe "root" machineUser
+  }
 
--- | Patch options to match backend specifics
-patchBackendOptions :: DeployOptions -> DeployOptions
-patchBackendOptions opts = case deployBackend opts of
-  Debian -> opts { deployUser = maybe (Just "admin") Just . deployUser $ opts }
-  _ -> opts
+-- | Transform nix file to desired config
+loadConfig :: MonadIO m => DeployOptions -> m Config
+loadConfig DeployOptions{..} = undefined
 
 -- | Execute program with given options
 runDeployment :: DeployOptions -> Task () -> IO ()
-runDeployment rawOpts buildPlan = do
-  let o@DeployOptions{..} = patchBackendOptions rawOpts
+runDeployment o@DeployOptions{..} buildPlan = do
+  Config{..} <- loadConfig o
   let dryRun ma = do
-        infos <- dryRunTask deployBackend ma
+
+        infos <- dryRunTask ma
         liftIO $ traverse_ (\(mn, b) -> echonColor White (fromMaybe "unnamed" mn <> " is ") >> if b then echoColor Green "applied" else echoColor Red "not applied" ) infos
   void $ keep' $ do
     setShellOptions ShellOptions {
@@ -89,9 +80,9 @@ runDeployment rawOpts buildPlan = do
       }
     case deployCommand of
       CommandDeploy ->
-        if deployDry then dryRun buildPlan else void $ executeTask deployForce deployBackend buildPlan
-      CommandRevert -> if deployDry then dryRun buildPlan else reverseTask deployBackend buildPlan
-      CommandNixify -> if deployDry then dryRun (nixifyPlan o) else executeTask deployForce deployBackend $ nixifyPlan o
+        if deployDry then dryRun buildPlan else void $ executeTask deployForce buildPlan
+      CommandRevert -> if deployDry then dryRun buildPlan else reverseTask buildPlan
+      CommandNixify -> if deployDry then dryRun (nixifyPlan o) else executeTask deployForce $ nixifyPlan o
 
 -- | Helper to parse text
 textArgument :: Mod ArgumentFields String -> Parser Text
