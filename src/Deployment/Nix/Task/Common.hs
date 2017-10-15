@@ -1,3 +1,4 @@
+{-# LANGUAGE TemplateHaskell #-}
 module Deployment.Nix.Task.Common(
     RemoteHost(..)
   , NixBuildInfo(..)
@@ -18,6 +19,8 @@ module Deployment.Nix.Task.Common(
   , copyDeploySshKeys
   , nixify
   , nixBuild
+  , nixConfigDerivs
+  , nixRelease
   , nixCopyClosures
   , nixCreateProfile
   , nixExtractDeriv
@@ -27,6 +30,7 @@ module Deployment.Nix.Task.Common(
   , installPostgres
   ) where
 
+import Data.FileEmbed (embedStringFile)
 import Data.Foldable (traverse_)
 import Data.Functor
 import Data.Monoid
@@ -291,7 +295,47 @@ nixBuild NixBuildInfo{..} = AtomTask {
     fmap fromText . T.lines <$> bash "nix-env" ["-qa", "--no-name", "--out-path", "-f " <> nixFileText]
 , taskReverse = pure ()
 }
-  where keyPos = "/etc/nix/signing-key.pub"
+
+-- | Build derivations with nix-store --release
+nixRelease :: Maybe FilePath -> [DerivationPath] -> Task ()
+nixRelease mSshConf derivs = AtomTask {
+  taskName = Just "Local build of derivations from nix file"
+, taskCheck = pure (True, ())
+, taskApply = transShell $ do
+    mSshConf' <- traverse toTextWarn mSshConf
+    bash_ "nix-store" $ "-r" : maybe "" ("-I ssh-config-file=" <>) mSshConf' : derivs
+    pure ()
+, taskReverse = pure ()
+}
+
+-- | Embed helper Nix expression to extract list of derivations from configuration
+getDerivFunc :: Text
+getDerivFunc = $(embedStringFile "data/get-derivs.nix")
+
+-- | Extract list of derivations (`.drv` files) that can be passed into `nixRelease` to build them. Input nix file
+-- should follow schema of deployment config.
+--
+-- Example of generated command:
+-- > nix-instantiate --argstr machine1 52.28.230.199 --argstr sshUser ubuntu -E "args@{machine1,sshUser}: let deploy = import ./deploy.nix; get-derivs = import ../../data/get-derivs.nix; pkgs = import <nixpkgs> {}; in if pkgs.lib.isFunction deploy then get-derivs (deploy args) else get-derivs deploy"
+nixConfigDerivs :: [(Text, Text)] -- ^ Key valud for `--arg` argument to nix-instantiate
+  -> Maybe FilePath -- ^ Path to ssh-config
+  -> FilePath -- ^ Path to deployment nix description
+  -> Task [DerivationPath] -- ^ List of derivations to build with `nixRelease`
+nixConfigDerivs args mSshConf deploy = liftShell ("Extract configuration derivations from " <> toTextIgnore deploy) [] $ do
+  mSshConf' <- traverse toTextWarn mSshConf
+  deploy' <- toTextWarn deploy
+  let sshArg = maybe "" ("-I ssh-config-file=" <>) mSshConf'
+      args' = fmap (\(k,v) -> "--arg \"" <> k <> "\" \"" <> v <> "\"") args
+      expr = T.unlines [
+          "-E \"args@{" <> T.intercalate "," (fmap fst args) <> "}:"
+        , "let deploy = (import " <> deploy' <> "); "
+        , "    get-derivs = (" <> getDerivFunc <> "); "
+        , "pkgs = import <nixpkgs> {}; "
+        , "in if pkgs.lib.isFunction deploy then get-derivs (deploy args) else get-derivs deploy"
+        , "\"" ]
+
+  output <- bash "nix-instantiate" $ [sshArg] <> args' <> [expr]
+  pure $ T.lines output
 
 -- | Copy ssh keys from ssh'ing user to given deploy user, so we can envoke nix-copy-closure
 copyDeploySshKeys :: RemoteHost -> Text -> Task ()
@@ -306,7 +350,6 @@ copyDeploySshKeys rh deployUser = AtomTask {
     pure ()
 , taskReverse = pure ()
 }
-  where
 
 -- | Sign, copy and install nix closures on remote host, need ability to ssh to deployUser
 nixCopyClosures :: RemoteHost -> Maybe KeyPath -> Text -> [DerivationPath] -> Task ()

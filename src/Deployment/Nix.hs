@@ -14,6 +14,7 @@ module Deployment.Nix(
   , defaultNixPlan
   ) where
 
+import Control.Arrow (second)
 import Control.Monad.IO.Class
 import Data.Aeson
 import Data.Foldable (traverse_, for_)
@@ -65,9 +66,20 @@ getRemoteHost MachineCfg{..} = RemoteHost {
   , remoteUser = fromMaybe "root" machineUser
   }
 
+-- | Convert input arguments to pairs of kev value and escape if needed
+parseNixArgs :: Monad m => DeployOptions -> m [(Text, Text)]
+parseNixArgs DeployOptions{..} = do
+  args <- traverse parseSingle deployNixArgs
+  strargs <- traverse parseSingle deployNixStrArgs
+  pure $ args <> fmap (second $ \v -> "\\\"" <> v <> "\\\"") strargs
+  where
+    parseSingle v = case T.splitOn ":" v of
+      k : v : _ -> pure (k, v)
+      _ -> fail $ "Argument " ++ unpack v ++ " is not in <key>:<value> format!"
+
 -- | Get some value from global deployment config with overriding from local machine config
 getDeploymentSmth :: a -> (DeploymentCfg -> Maybe a) -> Config -> MachineCfg -> a
-getDeploymentSmth defVal getter Config{..} MachineCfg{..} = fromMaybe defVal $ (getter =<< machineDeployment) <|> getter configDeployment
+getDeploymentSmth defVal getter Config{..} MachineCfg{..} = fromMaybe defVal $ (getter =<< machineDeployment) <|> (getter =<< configDeployment)
 
 -- | Calculate user-owner of deployment files with overriding from local machine settings
 getDeploymentUser :: Config -> MachineCfg -> UserName
@@ -76,7 +88,7 @@ getDeploymentUser = getDeploymentSmth "deploy" deploymentUser
 -- | Calculate user-owner of deployment files with overriding from local machine settings
 getDeploymentKeys :: MonadIO m => Config -> MachineCfg -> m [KeyPath]
 getDeploymentKeys Config{..} MachineCfg{..} = do
-  let mval = (deploymentKeys =<< machineDeployment) <|> deploymentKeys configDeployment
+  let mval = (deploymentKeys =<< machineDeployment) <|> (deploymentKeys =<< configDeployment)
   case mval of
     Just val -> pure val
     Nothing -> do
@@ -89,13 +101,11 @@ getDeploymentKeysTimeout = getDeploymentSmth 300 deploymentKeysTimeout
 
 -- | Transform nix file to desired config
 loadConfig :: MonadIO m => DeployOptions -> m Config
-loadConfig DeployOptions{..} = shelly $ do
-  let mkArg prefix v = case T.splitOn ":" v of
-        k : v : _ -> Just $ prefix <> k <> " " <> v
-        _ -> Nothing
-      args = catMaybes $ fmap (mkArg "--arg ") deployNixArgs <> fmap (mkArg "--argstr ") deployNixStrArgs
+loadConfig o@DeployOptions{..} = shelly $ do
+  rawArgs <- parseNixArgs o
+  let args = fmap (\(k, v) -> "--arg \"" <> k <> "\" \"" <> v <> "\"") rawArgs
       sshArg = maybe [] (\p -> ["-I ssh-config-file=" <> p]) deployNixSshConfig
-  json <- bash "nix-instantiate" (["--json", "--eval", "--strict"] <> sshArg <> args <> [deployNixFile])
+  json <- bash "nix-instantiate" (["--read-write-mode", "--json", "--eval", "--strict"] <> sshArg <> args <> [deployNixFile])
   cfg <- case eitherDecode' . BSL.fromStrict . encodeUtf8 $ json of
     Left er -> fail $ "Failed when parsing NIX json output: " <> unpack json <> ". Error: " <> er
     Right v -> pure v
@@ -118,7 +128,7 @@ runDeployment o@DeployOptions{..} buildPlan = do
       CommandDeploy ->
         if deployDry then dryRun bldPlan else void $ executeTask deployForce bldPlan
       CommandRevert -> if deployDry then dryRun bldPlan else reverseTask bldPlan
-      CommandNixify -> let plan = defaultNixPlan True cfg in if deployDry
+      CommandNixify -> let plan = defaultNixPlan True o cfg in if deployDry
         then dryRun plan else executeTask deployForce plan
 
 -- | Helper to parse text
@@ -202,14 +212,18 @@ whenJust Nothing _ = pure ()
 whenJust (Just a) f = f a
 
 -- | Plan to build nix project and deploy it on remote host
-defaultNixPlan :: Bool -> Config -> Task ()
-defaultNixPlan nixifyOnly cfg@Config{..} = for_ configMachines $ \mcfg@MachineCfg{..} -> do
-  let
-    rh = getRemoteHost mcfg
-    deployUser = getDeploymentUser cfg mcfg
-    keysTimeout = getDeploymentKeysTimeout cfg mcfg
-  keys <- liftShell "Get keys local path" [] $ getDeploymentKeys cfg mcfg
-  withSshKeys (Just keysTimeout) keys $ do
+defaultNixPlan :: Bool -> DeployOptions -> Config -> Task ()
+defaultNixPlan nixifyOnly opts@DeployOptions{..} cfg@Config{..} = do
+  args <- parseNixArgs opts -- important to place before any task as this is fail without reverse
+  derivs <- nixConfigDerivs args (fmap fromText deployNixSshConfig) (fromText deployNixFile)
+  nixRelease (fmap fromText deployNixSshConfig) derivs
+  for_ configMachines $ \mcfg@MachineCfg{..} -> do
+    let
+      rh = getRemoteHost mcfg
+      deployUser = getDeploymentUser cfg mcfg
+      keysTimeout = getDeploymentKeysTimeout cfg mcfg
+    keys <- liftShell "Get keys local path" [] $ getDeploymentKeys cfg mcfg
+    traverse_ (sshAgent $ Just keysTimeout) keys
     nixify rh deployUser
     unless nixifyOnly $ do
       nixCopyClosures rh (headMay keys) deployUser $ machineAllDerivations mcfg

@@ -131,7 +131,7 @@ machineAllDerivations MachineCfg{..} = fromMaybe [] machineDerivations
 
 -- | Config file that is generated from the nix description of deployment.
 data Config = Config {
-  configDeployment :: !DeploymentCfg
+  configDeployment :: !(Maybe DeploymentCfg)
 , configMachines   :: !(Map MachineName MachineCfg)
 } deriving (Eq, Show, Read, Generic, Data)
 deriveJSON dropPrefixOptions ''Config
