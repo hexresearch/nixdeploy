@@ -35,7 +35,6 @@ let
         enable = true; # auto-start?
       };
     };
-    derivations = [pkgs.dante];
     backend = "Ubuntu"; # Which internal backend to use
   };
 in {
