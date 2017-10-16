@@ -217,6 +217,7 @@ defaultNixPlan nixifyOnly opts@DeployOptions{..} cfg@Config{..} = do
   args <- parseNixArgs opts -- important to place before any task as this is fail without reverse
   derivs <- nixConfigDerivs args (fmap fromText deployNixSshConfig) (fromText deployNixFile)
   nixRelease (fmap fromText deployNixSshConfig) derivs
+  let hosts = M.elems $ M.mapWithKey (\name MachineCfg{..} -> (machineHost, name)) configMachines
   for_ configMachines $ \mcfg@MachineCfg{..} -> do
     let
       rh = getRemoteHost mcfg
@@ -226,6 +227,7 @@ defaultNixPlan nixifyOnly opts@DeployOptions{..} cfg@Config{..} = do
     traverse_ (sshAgent $ Just keysTimeout) keys
     nixify rh deployUser
     unless nixifyOnly $ do
+      addHosts rh hosts
       nixCopyClosures rh (headMay keys) deployUser $ machineAllDerivations mcfg
       whenJust machineDirectories $ traverse_ (ensureRemoteFolder rh)
       whenJust machinePostgres $ installPostgres rh

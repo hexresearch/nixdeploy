@@ -1,7 +1,7 @@
 {
   machine1 # ip of first machine
-#, machine2 # ip of second machine
-#, machine3 # ip of third machine
+, machine2 # ip of second machine
+, machine3 # ip of third machine
 , sshPort ? 22
 , sshUser ? "root"
 }:
@@ -42,7 +42,7 @@ in {
   # Description of each remote machine
   machines = {
     iperf1 = makeIPerfMachine machine1;
-    iperf2 = makeIPerfMachine machine1;
-#    iperf3 = makeIPerfMachine machine3;
+    iperf2 = makeIPerfMachine machine2;
+    iperf3 = makeIPerfMachine machine3;
   };
 }

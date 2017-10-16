@@ -28,6 +28,7 @@ module Deployment.Nix.Task.Common(
   , restartRemoteService
   , ensureRemoteFolder
   , installPostgres
+  , addHosts
   ) where
 
 import Data.FileEmbed (embedStringFile)
@@ -444,7 +445,7 @@ restartRemoteService rh serviceName = AtomTask {
 
 -- | Ensure that postgres is installed and init it with the given script (derivation path)
 installPostgres :: RemoteHost -> Text -> Task ()
-installPostgres rh derivSql =  AtomTask {
+installPostgres rh derivSql = AtomTask {
   taskName = Just $ "Init postgresql at " <> remoteAddress rh
 , taskCheck = transShell $ errExit False $ do
     reses <- isNotInstalled "postgresql"
@@ -464,6 +465,33 @@ installPostgres rh derivSql =  AtomTask {
       _ <- shellRemoteSSH rh [sudo ("dpkg", ["--get-selections | grep -q \"^" <> name <> "[[:space:]]*install$\""])]
       err <- lastExitCode
       pure (err /= 0)
+
+-- | Add the entries to remote /etc/hosts file
+addHosts :: RemoteHost -> [(Text, Text)] -> Task ()
+addHosts rh newHosts = AtomTask {
+  taskName = Just $ "Modify /etc/hosts at " <> remoteAddress rh
+, taskCheck = transShell $ errExit False $ do
+    reses <- traverse hasHost $ fmap snd newHosts
+    pure (and . fmap not $ reses, ())
+, taskApply = void $ transShell $ do
+    let cnt = T.intercalate "\n" $ (\(k, v) -> k <> "  " <> v) <$> newHosts
+    hosts <- shellRemoteSSH rh [("cat", ["/etc/hosts"])]
+    withTmpDir $ \dir -> do
+      let tmpFile = dir </> fromText "hosts"
+      writefile tmpFile $ hosts <> cnt <> "\n"
+      remoteScpTo rh tmpFile "hosts"
+      _ <- shellRemoteSSH rh [sudo ("mv", ["hosts", "/etc/hosts"])]
+      pure ()
+, taskReverse = transShell $ errExit False $ traverse_ removeHost $ fmap snd newHosts
+}
+  where
+    hasHost h = do
+      _ <- shellRemoteSSH rh [("grep", ["-q", h, "/etc/hosts"])]
+      err <- lastExitCode
+      pure $ err == 0
+    removeHost h = do
+      _ <- shellRemoteSSH rh [sudo ("sed", ["-i", "/"<>h<>"/d", "/etc/hosts"])]
+      pure ()
 
 -- | Helper that holds tasks for installing nix infrastructure on remote host
 --
