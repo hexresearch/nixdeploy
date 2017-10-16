@@ -8,16 +8,19 @@ module Deployment.Nix.Task(
   , ShellOptions(..)
   , setShellOptions
   , transShell
+  , setMachineName
   -- * Color helpers
   , echonColor
   , echoColor
   , Color(..)
   ) where
 
+import Control.Applicative
 import Control.Exception.Base (SomeException)
 import Control.Monad
 import Control.Monad.Catch (MonadMask, bracket_)
 import Control.Monad.IO.Class
+import Data.Bifunctor
 import Data.Foldable (traverse_)
 import Data.Maybe
 import Data.Monoid
@@ -37,8 +40,10 @@ data Task a where
       taskName    :: Maybe Text
       -- | Check that task is need to be applied. 'True' means need to apply, second
       -- value is used as default result of task if no need to apply and as default
-      -- value of task on reverse process.
-    , taskCheck   :: TransIO (Bool, a)
+      -- value of task on reverse process. Left value is used for checks that are
+      -- always passes, so we don't call IO action and Left value is used for reverse
+      -- process.
+    , taskCheck   :: Either a (TransIO (Bool, a))
       -- | Apply task
     , taskApply   :: TransIO a
       -- | Revert task side effects (if possible)
@@ -53,7 +58,7 @@ instance Functor Task where
   fmap f t = case t of
     AtomTask{..} -> AtomTask {
         taskName = taskName
-      , taskCheck = fmap f <$> taskCheck
+      , taskCheck = bimap f (fmap . fmap $ f) taskCheck
       , taskApply = f <$> taskApply
       , taskReverse = taskReverse
       }
@@ -63,7 +68,7 @@ instance Functor Task where
 instance Applicative Task where
   pure a = AtomTask {
       taskName = Nothing
-    , taskCheck = pure (False, a)
+    , taskCheck = Left a
     , taskApply = pure a
     , taskReverse = pure ()
     }
@@ -77,7 +82,7 @@ instance Monad Task where
 liftShell :: Text -> a -> Sh a -> Task a
 liftShell name a0 ma = AtomTask {
     taskName = Just name
-  , taskCheck = pure (True, a0)
+  , taskCheck = Left a0
   , taskApply = transShell ma
   , taskReverse = pure ()
   }
@@ -115,6 +120,51 @@ echonColor c = withSGR [SetConsoleIntensity BoldIntensity, SetColor Foreground V
 echoColor :: (MonadIO m, MonadMask m) => Color -> Text -> m ()
 echoColor c = withSGR [SetConsoleIntensity BoldIntensity, SetColor Foreground Vivid c] . liftIO . T.putStrLn
 
+-- | Type wrapper for storage of current machine name for logging purpose
+data CurrentMachine = CurrentMachine Color Text
+
+-- | Type wrapper to store queue of machine colors
+newtype MachineColors = MachineColors [Color]
+
+-- | Allowed colors for machine names
+machineColors :: [Color]
+machineColors = [
+    Green
+  , Yellow
+  , Blue
+  , Magenta
+  , Cyan
+  ]
+
+-- | Return next color for machine name in cycle
+getNextMachineColor :: TransIO Color
+getNextMachineColor = do
+  mres <- getData
+  case mres of
+    Nothing -> do
+      setData $ MachineColors $ cycle machineColors
+      getNextMachineColor
+    Just (MachineColors colors) -> do
+      setData $ MachineColors $ drop 1 colors
+      pure $ head colors
+
+-- | Set current machine name for logging
+setMachineName :: MachineName -> Task ()
+setMachineName nm = AtomTask {
+    taskName = Just $ "Setting current machine to " <> nm
+  , taskCheck = Left ()
+  , taskApply = do
+      c <- getNextMachineColor
+      setData $ CurrentMachine c nm
+  , taskReverse = pure ()
+  }
+
+-- | If current machine is set, print without newline prefix for the machine
+printMachineName :: TransIO ()
+printMachineName = do
+  mres <- getData
+  whenJust mres $ \(CurrentMachine mcol mname) -> liftIO $ echonColor mcol $ mname <> "> "
+
 -- | Apply task if needed
 executeTask :: forall a . Bool -> Task a -> TransIO a
 executeTask needForce = go
@@ -122,17 +172,26 @@ executeTask needForce = go
     go :: Task b -> TransIO b
     go t = case t of
       AtomTask{..} -> do
-        whenJust taskName $ \nm -> liftIO $ echonColor White $ "Checking task " <> nm <> "... "
-        (checkResult, a) <- taskCheck
-        let needApply = needForce || checkResult
-        whenJust taskName $ \nm -> liftIO $ if needApply then echoColor Red "need apply" else echoColor Green "ok"
-        if needApply then do
-            whenJust taskName $ \nm -> liftIO $ echoColor White $ "Applying task " <> nm
-            onException $ \(e :: SomeException) -> do
-              whenJust taskName $ \nm -> liftIO $ echoColor White $ "Reversing task " <> nm
-              taskReverse
-            taskApply
-          else pure a
+        let taskPrint col msg = whenJust taskName $ \nm -> do
+              printMachineName
+              liftIO $ echonColor col $ msg nm
+            apply = do
+              taskPrint White $ \nm -> "Applying task " <> nm <> "\n"
+              onException $ \(e :: SomeException) -> do
+                taskPrint White $ \nm -> "Reversing task " <> nm <> "\n"
+                taskReverse
+              taskApply
+        case taskCheck of
+          Left _ -> apply
+          Right chk -> do
+            taskPrint White $ \nm -> "Checking task " <> nm <> "... "
+            (checkResult, a) <- chk
+            if needForce || checkResult then do
+                whenJust taskName $ const $ liftIO $ echoColor Red "need apply"
+                apply
+              else do
+                whenJust taskName $ const $ liftIO $ echoColor Green "ok"
+                pure a
       TaskApplicative fa ta -> do
         f <- go fa
         a <- go ta
@@ -151,9 +210,11 @@ reverseTask t = do
   where
     go :: Task b -> TransIO (b, [(Maybe Text, TransIO ())])
     go t = case t of
-      AtomTask{..} -> do
-        (needApply, a) <- taskCheck
-        pure $ if needApply then (a, []) else (a, [(taskName, taskReverse)])
+      AtomTask{..} -> case taskCheck of
+        Left a -> pure (a, [(taskName, taskReverse)])
+        Right chk -> do
+          (needApply, a) <- chk
+          pure $ if needApply then (a, []) else (a, [(taskName, taskReverse)])
       TaskApplicative fa ta -> do
         (f, freverses) <- go fa
         (a, areverses) <- go ta
@@ -169,9 +230,11 @@ dryRunTask = fmap snd . go
   where
     go :: Task b -> TransIO (b, [(Maybe Text, Bool)])
     go t = case t of
-      AtomTask{..} -> do
-        (needApply, a) <- taskCheck
-        pure (a, [(taskName, not needApply)])
+      AtomTask{..} -> case taskCheck of
+        Left a -> pure (a, [(taskName, False)])
+        Right chk ->do
+          (needApply, a) <- chk
+          pure (a, [(taskName, not needApply)])
       TaskApplicative fa ta -> do
         (f, freverses) <- go fa
         (a, areverses) <- go ta

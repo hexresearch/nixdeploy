@@ -218,11 +218,12 @@ defaultNixPlan nixifyOnly opts@DeployOptions{..} cfg@Config{..} = do
   derivs <- nixConfigDerivs args (fmap fromText deployNixSshConfig) (fromText deployNixFile)
   nixRelease (fmap fromText deployNixSshConfig) derivs
   let hosts = M.elems $ M.mapWithKey (\name MachineCfg{..} -> (machineHost, name)) configMachines
-  for_ configMachines $ \mcfg@MachineCfg{..} -> do
+  for_ (M.toList configMachines) $ \(name, mcfg@MachineCfg{..}) -> do
     let
       rh = getRemoteHost mcfg
       deployUser = getDeploymentUser cfg mcfg
       keysTimeout = getDeploymentKeysTimeout cfg mcfg
+    setMachineName name
     keys <- liftShell "Get keys local path" [] $ getDeploymentKeys cfg mcfg
     traverse_ (sshAgent $ Just keysTimeout) keys
     nixify rh deployUser

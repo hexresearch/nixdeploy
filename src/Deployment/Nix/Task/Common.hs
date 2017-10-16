@@ -91,9 +91,11 @@ applyReverse :: a -- ^ Value that will be returned after reverse script
 applyReverse defVal t = case t of
   AtomTask{..} -> AtomTask {
       taskName = ("Reversed " <>) <$> taskName
-    , taskCheck = do
-        (_, a) <- taskCheck
-        pure (True, a)
+    , taskCheck = case taskCheck of
+        Left a -> Left a
+        Right chk -> Right $ do
+          (_, a) <- chk
+          pure (True, a)
     , taskApply = taskReverse >> pure defVal
     , taskReverse = taskReverse
     }
@@ -116,7 +118,7 @@ bracketReverse ta tb = do
 sshAgent :: Maybe Int -> KeyPath -> Task ()
 sshAgent mseconds key = AtomTask {
   taskName = Just $ "Adding key " <> pack (unConfigPath key) <> " to ssh-agent"
-, taskCheck = transShell $ errExit False $ do
+, taskCheck = Right $ transShell $ errExit False $ do
     hasAgent <- isSshAgentExist
     pubkeys <- T.lines <$> bash "ssh-add" ["-L"]
     pubkey <- readfile $ addExtensions (fromText . pack . unConfigPath $ key) ["pub"]
@@ -162,7 +164,7 @@ sudoFrom user (prog, args) = ("sudo", ["-i", "-u " <> user] ++ toTextArg prog : 
 aptPackages :: RemoteHost -> [Text] -> Task ()
 aptPackages rh pkgs = AtomTask {
   taskName = Just $ "Installation of " <> T.intercalate ", " pkgs <> " via apt-get"
-, taskCheck = transShell $ errExit False $ do
+, taskCheck = Right $ transShell $ errExit False $ do
     reses <- traverse isNotInstalled pkgs
     pure (or reses, ())
 , taskApply = void $ transShell $
@@ -182,7 +184,7 @@ aptPackages rh pkgs = AtomTask {
 ensureRemoteFolder :: RemoteHost -> DirectoryCfg -> Task ()
 ensureRemoteFolder rh DirectoryCfg{..} = AtomTask {
   taskName = Just $ "Ensure folder " <> directoryPath <> " at " <> remoteAddress rh
-, taskCheck = transShell $ errExit False $ do
+, taskCheck = Right $ transShell $ errExit False $ do
     _ <- shellRemoteSSH rh [sudo ("ls", [directoryPath <> " > /dev/null 2>&1"])] -- TODO: check that is directory and own user
     err <- lastExitCode
     pure (err /= 0, ())
@@ -196,7 +198,7 @@ ensureRemoteFolder rh DirectoryCfg{..} = AtomTask {
 addUser :: RemoteHost -> Text -> Task ()
 addUser rh user = AtomTask {
   taskName = Just $ "Creation of user " <> user
-, taskCheck = transShell $ errExit False $ do
+, taskCheck = Right $ transShell $ errExit False $ do
     _ <- shellRemoteSSH rh [sudo ("id", ["-u", user <> " > /dev/null 2>&1"])]
     err <- lastExitCode
     pure (err /= 0, ())
@@ -211,7 +213,7 @@ addUser rh user = AtomTask {
 installNix :: RemoteHost -> Text -> Task ()
 installNix rh deployUser = AtomTask {
   taskName = Just "Installation of nix package manager"
-, taskCheck = transShell $ errExit False $ do
+, taskCheck = Right $ transShell $ errExit False $ do
     _ <- shellRemoteSSH rh [raiseNixEnv deployUser, ("which", ["nix-build > /dev/null 2>&1"])]
     err <- lastExitCode
     pure (err /= 0, ())
@@ -233,7 +235,7 @@ installNix rh deployUser = AtomTask {
 makeNixLinks :: RemoteHost -> Text -> Task ()
 makeNixLinks rh deployUser = AtomTask {
   taskName = Just $ "Making global nix symlinks from user " <> deployUser
-, taskCheck = transShell $ errExit False $ do
+, taskCheck = Right $ transShell $ errExit False $ do
     isStore <- checkFile "/usr/bin/nix-store"
     pure (not isStore, ())
 , taskApply = void $ transShell $
@@ -257,7 +259,7 @@ raiseNixEnv deployUser = ("source", ["/home/" <> deployUser <> "/.nix-profile/et
 genNixSignKeys :: Task ()
 genNixSignKeys = AtomTask {
   taskName = Just "Generate local signin keys for closures"
-, taskCheck = transShell $ errExit False $ do
+, taskCheck = Right $ transShell $ errExit False $ do
     privateExist <- test_f "/etc/nix/signing-key.sec"
     publicExist <- test_f "/etc/nix/signing-key.pub"
     pure (not privateExist || not publicExist, ())
@@ -273,7 +275,7 @@ genNixSignKeys = AtomTask {
 copyNixSignKeys :: RemoteHost -> Task ()
 copyNixSignKeys rh = AtomTask {
   taskName = Just $ "Copy signing keys to " <> remoteAddress rh
-, taskCheck = transShell $ errExit False $ do
+, taskCheck = Right $ transShell $ errExit False $ do
     _ <- shellRemoteSSH rh [sudo ("ls", [keyPos <> " > /dev/null 2>&1"])]
     err <- lastExitCode
     pure (err /= 0, ())
@@ -294,7 +296,7 @@ copyNixSignKeys rh = AtomTask {
 nixBuild :: NixBuildInfo -> Task [FilePath]
 nixBuild NixBuildInfo{..} = AtomTask {
   taskName = Just $ "Local nix-build of " <> toTextIgnore nixBuildFile
-, taskCheck = pure (True, [])
+, taskCheck = Left []
 , taskApply = transShell $ do
     nixFileText <- toTextWarn nixBuildFile
     bash_ "nix-build" [maybe "" (("-I ssh-config-file=" <>) . toTextIgnore) nixBuildSshConfig, nixFileText]
@@ -306,7 +308,7 @@ nixBuild NixBuildInfo{..} = AtomTask {
 nixRelease :: Maybe FilePath -> [DerivationPath] -> Task ()
 nixRelease mSshConf derivs = AtomTask {
   taskName = Just "Local build of derivations from nix file"
-, taskCheck = pure (True, ())
+, taskCheck = Left ()
 , taskApply = transShell $ do
     mSshConf' <- traverse toTextWarn mSshConf
     bash_ "nix-store" $ "-r" : maybe "" ("-I ssh-config-file=" <>) mSshConf' : derivs
@@ -347,7 +349,7 @@ nixConfigDerivs args mSshConf deploy = liftShell ("Extract configuration derivat
 copyDeploySshKeys :: RemoteHost -> Text -> Task ()
 copyDeploySshKeys rh deployUser = AtomTask {
   taskName = Just $ "Copy SSH keys for user " <> deployUser
-, taskCheck = pure (True, ())
+, taskCheck = Left ()
 , taskApply = transShell $ do
     let home user = if user == "root" then "/root" else "/home/" <> user
     _ <- shellRemoteSSH rh [
@@ -361,7 +363,7 @@ copyDeploySshKeys rh deployUser = AtomTask {
 nixCopyClosures :: RemoteHost -> Maybe KeyPath -> Text -> [DerivationPath] -> Task ()
 nixCopyClosures rh mkey deployUser closures = AtomTask {
     taskName = Just $ "Copy closures to " <> remoteAddress rh
-  , taskCheck = pure (True, ())
+  , taskCheck = Left ()
   , taskApply = transShell $ do
       let keyArg = maybe "" (\key -> " -i \"" <> (pack . unConfigPath $ key) <> "\"") mkey
       let sshOpts = "NIX_SSHOPTS='-p " <> pack (show $ remotePort rh) <> keyArg <> "'"
@@ -379,7 +381,7 @@ nixCopyClosures rh mkey deployUser closures = AtomTask {
 nixCreateProfile :: RemoteHost -> Text -> Task ()
 nixCreateProfile rh deployUser = AtomTask {
     taskName = Just $ "Create nix profile for " <> deployUser <> " at " <> remoteAddress rh
-  , taskCheck = transShell $ errExit False $ do
+  , taskCheck = Right $ transShell $ errExit False $ do
       _ <- shellRemoteSSH rh [sudo ("ls", ["/opt/" <> deployUser <> " > /dev/null 2>&1"])]
       err <- lastExitCode
       pure (err /= 0, ())
@@ -400,7 +402,7 @@ nixCreateProfile rh deployUser = AtomTask {
 nixExtractDeriv :: NixBuildInfo -> Text -> Task Text
 nixExtractDeriv NixBuildInfo{..} name = AtomTask {
     taskName = Just $ "Get deriviation for " <> name
-  , taskCheck = transShell $ do
+  , taskCheck = Right $ transShell $ do
       res <- extract
       pure (False, T.filter (\c -> c /= '\r' && c /= '\n') res)
   , taskApply = transShell extract
@@ -415,7 +417,7 @@ nixExtractDeriv NixBuildInfo{..} name = AtomTask {
 nixSymlinkService :: RemoteHost -> Text -> Text -> Bool -> Task ()
 nixSymlinkService rh deriv serviceName enable = AtomTask {
     taskName = Just $ "Symlink systemd service " <> serviceName <> " at " <> remoteAddress rh
-  , taskCheck = pure (True, ())
+  , taskCheck = Left ()
   , taskApply = transShell $ do
       _ <- errExit False $ shellRemoteSSH rh [sudo ("rm", ["-f", servicePath])]
       _ <- shellRemoteSSH rh $
@@ -436,7 +438,7 @@ nixSymlinkService rh deriv serviceName enable = AtomTask {
 restartRemoteService :: RemoteHost -> Text -> Task ()
 restartRemoteService rh serviceName = AtomTask {
     taskName = Just $ "Restart systemd service " <> serviceName <> " at " <> remoteAddress rh
-  , taskCheck = pure (True, ())
+  , taskCheck = Left ()
   , taskApply = transShell $ do
       _ <- shellRemoteSSH rh [sudo ("systemctl", ["restart", serviceName])]
       pure ()
@@ -447,7 +449,7 @@ restartRemoteService rh serviceName = AtomTask {
 installPostgres :: RemoteHost -> Text -> Task ()
 installPostgres rh derivSql = AtomTask {
   taskName = Just $ "Init postgresql at " <> remoteAddress rh
-, taskCheck = transShell $ errExit False $ do
+, taskCheck = Right $ transShell $ errExit False $ do
     reses <- isNotInstalled "postgresql"
     pure (reses, ())
 , taskApply = void $ transShell $
@@ -470,7 +472,7 @@ installPostgres rh derivSql = AtomTask {
 addHosts :: RemoteHost -> [(Text, Text)] -> Task ()
 addHosts rh newHosts = AtomTask {
   taskName = Just $ "Modify /etc/hosts at " <> remoteAddress rh
-, taskCheck = transShell $ errExit False $ do
+, taskCheck = Right $ transShell $ errExit False $ do
     reses <- traverse hasHost $ fmap snd newHosts
     pure (and . fmap not $ reses, ())
 , taskApply = void $ transShell $ do
