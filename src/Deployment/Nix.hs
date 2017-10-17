@@ -6,27 +6,32 @@ module Deployment.Nix(
   , RemoteHost(..)
   , NixBuildInfo(..)
   , runDeployment
-  , getNixBuildInfo
   , getRemoteHost
   , module R
   -- * CLI helpers
   , deployOptionsParser
   , makeDeploymentCLI
   , defaultNixPlan
-  , nixifyPlan
   ) where
 
+import Control.Arrow (second)
+import Control.Monad.IO.Class
+import Data.Aeson
 import Data.Foldable (traverse_, for_)
 import Data.Functor
 import Data.Maybe
 import Data.Monoid
 import Data.Text (Text, pack, unpack)
+import Data.Text.Encoding
+import Deployment.Nix.Config
 import Options.Applicative
 import Safe (headMay)
 import Shelly hiding (command)
-import System.FilePath (takeFileName)
+import System.FilePath (takeFileName, takeDirectory)
 import Transient.Base hiding (option)
 
+import qualified Data.ByteString.Lazy as BSL
+import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 
 import Deployment.Nix.Task as R
@@ -35,22 +40,13 @@ import Deployment.Nix.Task.Common as R
 -- | CLI options
 data DeployOptions = DeployOptions {
   deployCommand       :: Command
-, deployHost          :: Text
-, deployNixFile       :: Text -- ^ Path to .nix file with derivations that need to be deployed
+, deployNixFile       :: Text       -- ^ Path to .nix file with full description of deployment. Config is generated from the nix expression.
+, deployNixArgs       :: [Text]     -- ^ Arguments that are passed to nix deployment file
+, deployNixStrArgs    :: [Text]     -- ^ Arguments that are passed to nix deployment file as Nix string values (you haven't to escape quotes by triple back slash)
 , deployNixSshConfig  :: Maybe Text -- ^ Path to ssh-config to use for nix-build
-, deployKeys          :: [Text] -- ^ Which ssh keys to add to ssh-agent
-, deployKeysTimeout   :: Maybe Int -- ^ Number of seconds for `deployKeys` to expire
-, deployPort          :: Int -- ^ ssh port
-, deployUser          :: Maybe Text
-, deployServices      :: [Text] -- ^ Names of derivations in `deployNixFile` that are symlinked to /etc/systemd/system
-, deployTools         :: [Text] -- ^ Names of derivations in `deployNixFile` that are symlinked to /etc/systemd/system, but not enabled.
-                                -- They are usually a one-shot systemd units for administrative tools.
-, deployFolders       :: [Text] -- ^ Set of folders that we need to create on remote machine
-, deployPostgres      :: Maybe Text -- ^ Path to deriviation with SQL init script
-, deployDry           :: Bool -- ^ Only print wich tasks need to be deployed
-, deployVerbose       :: Bool -- ^ Verbose output from shell
-, deployForce         :: Bool -- ^ When enabled, force all checks to apply tasks
-, deployBackend       :: Backend -- ^ Which backend to use on remote host
+, deployDry           :: Bool       -- ^ Only print wich tasks need to be deployed
+, deployVerbose       :: Bool       -- ^ Verbose output from shell
+, deployForce         :: Bool       -- ^ When enabled, force all checks to apply tasks
 }
 
 -- | Available CLI commands to perform
@@ -62,36 +58,78 @@ data Command =
     -- | Install nix infrastructure only
     | CommandNixify
 
--- | Extract nix build info from options
-getNixBuildInfo :: DeployOptions -> NixBuildInfo
-getNixBuildInfo DeployOptions{..} = NixBuildInfo (fromText deployNixFile) (fromText <$> deployNixSshConfig)
-
 -- | Extract remote host info from options
-getRemoteHost :: DeployOptions -> RemoteHost
-getRemoteHost DeployOptions{..} = RemoteHost deployHost deployPort (fromMaybe "root" deployUser)
+getRemoteHost :: MachineCfg -> RemoteHost
+getRemoteHost MachineCfg{..} = RemoteHost {
+    remoteAddress = machineHost
+  , remotePort = fromMaybe 22 machinePort
+  , remoteUser = fromMaybe "root" machineUser
+  }
 
--- | Patch options to match backend specifics
-patchBackendOptions :: DeployOptions -> DeployOptions
-patchBackendOptions opts = case deployBackend opts of
-  Debian -> opts { deployUser = maybe (Just "admin") Just . deployUser $ opts }
-  _ -> opts
+-- | Convert input arguments to pairs of kev value and escape if needed
+parseNixArgs :: Monad m => DeployOptions -> m [(Text, Text)]
+parseNixArgs DeployOptions{..} = do
+  args <- traverse parseSingle deployNixArgs
+  strargs <- traverse parseSingle deployNixStrArgs
+  pure $ args <> fmap (second $ \v -> "\\\"" <> v <> "\\\"") strargs
+  where
+    parseSingle v = case T.splitOn ":" v of
+      k : v : _ -> pure (k, v)
+      _ -> fail $ "Argument " ++ unpack v ++ " is not in <key>:<value> format!"
+
+-- | Get some value from global deployment config with overriding from local machine config
+getDeploymentSmth :: a -> (DeploymentCfg -> Maybe a) -> Config -> MachineCfg -> a
+getDeploymentSmth defVal getter Config{..} MachineCfg{..} = fromMaybe defVal $ (getter =<< machineDeployment) <|> (getter =<< configDeployment)
+
+-- | Calculate user-owner of deployment files with overriding from local machine settings
+getDeploymentUser :: Config -> MachineCfg -> UserName
+getDeploymentUser = getDeploymentSmth "deploy" deploymentUser
+
+-- | Calculate user-owner of deployment files with overriding from local machine settings
+getDeploymentKeys :: MonadIO m => Config -> MachineCfg -> m [KeyPath]
+getDeploymentKeys Config{..} MachineCfg{..} = do
+  let mval = (deploymentKeys =<< machineDeployment) <|> (deploymentKeys =<< configDeployment)
+  case mval of
+    Just val -> pure val
+    Nothing -> do
+      home <- shelly $ T.filter (/= '\n') <$> bash "echo" ["$HOME"]
+      pure [ConfigPath . unpack $ home <> "/.ssh/id_rsa"]
+
+-- | Calculate user-owner of deployment files with overriding from local machine settings
+getDeploymentKeysTimeout :: Config -> MachineCfg -> Int
+getDeploymentKeysTimeout = getDeploymentSmth 300 deploymentKeysTimeout
+
+-- | Transform nix file to desired config
+loadConfig :: MonadIO m => DeployOptions -> m Config
+loadConfig o@DeployOptions{..} = shelly $ do
+  rawArgs <- parseNixArgs o
+  let args = fmap (\(k, v) -> "--arg \"" <> k <> "\" \"" <> v <> "\"") rawArgs
+      sshArg = maybe [] (\p -> ["-I ssh-config-file=" <> p]) deployNixSshConfig
+  json <- bash "nix-instantiate" (["--read-write-mode", "--json", "--eval", "--strict"] <> sshArg <> args <> [deployNixFile])
+  cfg <- case eitherDecode' . BSL.fromStrict . encodeUtf8 $ json of
+    Left er -> fail $ "Failed when parsing NIX json output: " <> unpack json <> ". Error: " <> er
+    Right v -> pure v
+  let cfgDir = takeDirectory $ unpack deployNixFile
+  absolutize cfgDir cfg
 
 -- | Execute program with given options
-runDeployment :: DeployOptions -> Task () -> IO ()
-runDeployment rawOpts buildPlan = do
-  let o@DeployOptions{..} = patchBackendOptions rawOpts
+runDeployment :: DeployOptions -> (Config -> Task ()) -> IO ()
+runDeployment o@DeployOptions{..} buildPlan = do
+  cfg@Config{..} <- loadConfig o
   let dryRun ma = do
-        infos <- dryRunTask deployBackend ma
+        infos <- dryRunTask ma
         liftIO $ traverse_ (\(mn, b) -> echonColor White (fromMaybe "unnamed" mn <> " is ") >> if b then echoColor Green "applied" else echoColor Red "not applied" ) infos
   void $ keep' $ do
     setShellOptions ShellOptions {
         shellVerbose = deployVerbose
       }
+    let bldPlan = buildPlan cfg
     case deployCommand of
       CommandDeploy ->
-        if deployDry then dryRun buildPlan else void $ executeTask deployForce deployBackend buildPlan
-      CommandRevert -> if deployDry then dryRun buildPlan else reverseTask deployBackend buildPlan
-      CommandNixify -> if deployDry then dryRun (nixifyPlan o) else executeTask deployForce deployBackend $ nixifyPlan o
+        if deployDry then dryRun bldPlan else void $ executeTask deployForce bldPlan
+      CommandRevert -> if deployDry then dryRun bldPlan else reverseTask bldPlan
+      CommandNixify -> let plan = defaultNixPlan True o cfg in if deployDry
+        then dryRun plan else executeTask deployForce plan
 
 -- | Helper to parse text
 textArgument :: Mod ArgumentFields String -> Parser Text
@@ -106,62 +144,25 @@ deployOptionsParser :: Parser DeployOptions
 deployOptionsParser = DeployOptions
   <$> cliCommand
   <*> textArgument (
-      metavar "MACHINE_IP"
-    )
-  <*> textArgument (
        metavar "NIX_FILE"
     <> showDefault
-    <> value "./default.nix"
-    <> help "Which .nix file to deploy"
+    <> value "./deploy.nix"
+    <> help "Path to .nix file with full description of deployment."
+    )
+  <*> (many . textOption) (
+       long "arg"
+    <> metavar "NIX_KEY_VALUE"
+    <> help "Multiple arguments can be specified. Nix file argument in format 'key:value'. The arguments are passed to NIX_FILE via nix-instantiate --arg option."
+    )
+  <*> (many . textOption) (
+       long "argstr"
+    <> metavar "NIX_KEY_VALUE"
+    <> help "Multiple arguments can be specified. Nix file argument in format 'key:value' with value of fixed Nix string type (you haven't to escape quotes by triple back slash) The arguments are passed to NIX_FILE via nix-instantiate --arg option."
     )
   <*> (optional . textOption) (
        long "nix-ssh-config"
     <> metavar "NIX_SSH_CONFIG"
-    <> help "Which ssh config to use with nix-build"
-    )
-  <*> (many . textOption) (
-       long "key"
-    <> metavar "SSH_PRIVATE_KEY_PATH"
-    <> help "Path to encrypted private key that will be added to ssh-agent"
-    )
-  <*> (optional . option auto) (
-       long "keys-timeout"
-    <> metavar "INT_SECONDS"
-    <> help "Number of seconds the ssh keys will expired after"
-    )
-  <*> option auto (
-       long "port"
-    <> short 'p'
-    <> metavar "DEPLOY_PORT"
-    <> showDefault
-    <> value 22
-    <> help "Default SSH port"
-  )
-  <*> (optional . textOption) (
-       long "user"
-    <> short 'u'
-    <> metavar "DEPLOY_USER"
-    <> help "Which user to deploy with (default is root or admin for Debian)"
-    )
-  <*> (many . textOption) (
-       long "service"
-    <> metavar "SERVICE_ATR_NAME"
-    <> help "Derivation in .nix file that should be symlinked as systemd service"
-    )
-  <*> (many . textOption) (
-       long "tool"
-    <> metavar "SERVICE_ATR_NAME"
-    <> help "Derivation in .nix file that should be symlinked as systemd service, but not enabled"
-    )
-  <*> (many . textOption) (
-       long "folder"
-    <> metavar "FOLDER_PATH"
-    <> help "Folder on remote machine that we need to create if it is missing"
-    )
-  <*> (optional . textOption) (
-       long "postgres"
-    <> metavar "SQL_DERIVATION"
-    <> help "If specified, install postgres and feed the given derivation from .nix file as init SQL script"
+    <> help "Which ssh config to use with NIX_FILE"
     )
   <*> switch (
        long "dry"
@@ -178,11 +179,6 @@ deployOptionsParser = DeployOptions
     <> short 'f'
     <> help "Force all checks to 'need to apply'"
     )
-  <*> option auto (
-       long "backend"
-    <> short 'b'
-    <> help "Which command set to use, possible values: Ubuntu, Debian."
-    )
   where
     cliCommand = subparser $
          command "deploy" (info (deployCmd <**> helper) $ progDesc "Apply deployment to remote host")
@@ -195,7 +191,7 @@ deployOptionsParser = DeployOptions
 -- | Generate CLI application for deployment with given build plan
 makeDeploymentCLI :: Parser a -- ^ CLI parser
   -> (a -> DeployOptions) -- ^ How to extract deploy options from the cli parser result
-  -> (a -> Task ()) -- ^ Build plan
+  -> (a -> Config -> Task ()) -- ^ Build plan
   -> IO ()
 makeDeploymentCLI parser getOpts buildPlan = do
   a <- execParser parserInfo
@@ -215,34 +211,28 @@ whenJust :: Applicative f => Maybe a -> (a -> f ()) -> f ()
 whenJust Nothing _ = pure ()
 whenJust (Just a) f = f a
 
--- | Build plan that infest remote host with nix and no more
-nixifyPlan :: DeployOptions -> Task ()
-nixifyPlan opts@DeployOptions{..} = do
-  let
-    rh = getRemoteHost opts
-    deployUser = "deploy"
-  withSshKeys deployKeysTimeout deployKeys $ nixify rh deployUser
-
 -- | Plan to build nix project and deploy it on remote host
-defaultNixPlan :: DeployOptions -> Task ()
-defaultNixPlan opts@DeployOptions{..} = do
-  let
-    nixBuildInfo = getNixBuildInfo opts
-    rh = getRemoteHost opts
-    deployUser = "deploy"
-  withSshKeys deployKeysTimeout deployKeys $ do
+defaultNixPlan :: Bool -> DeployOptions -> Config -> Task ()
+defaultNixPlan nixifyOnly opts@DeployOptions{..} cfg@Config{..} = do
+  args <- parseNixArgs opts -- important to place before any task as this is fail without reverse
+  derivs <- nixConfigDerivs args (fmap fromText deployNixSshConfig) (fromText deployNixFile)
+  nixRelease (fmap fromText deployNixSshConfig) derivs
+  let hosts = M.elems $ M.mapWithKey (\name MachineCfg{..} -> (machineHost, name)) configMachines
+  for_ (M.toList configMachines) $ \(name, mcfg@MachineCfg{..}) -> do
+    let
+      rh = getRemoteHost mcfg
+      deployUser = getDeploymentUser cfg mcfg
+      keysTimeout = getDeploymentKeysTimeout cfg mcfg
+    setMachineName name
+    keys <- liftShell "Get keys local path" [] $ getDeploymentKeys cfg mcfg
+    traverse_ (sshAgent $ Just keysTimeout) keys
     nixify rh deployUser
-    derivs <- nixBuild nixBuildInfo
-    liftShell "Print derivs" () $ mapM_ (echo . toTextIgnore) derivs
-    nixCopyClosures rh (headMay deployKeys) deployUser derivs
-    traverse_ (\f -> ensureRemoteFolder rh f "root") deployFolders
-    whenJust deployPostgres $ \derivSqlName -> do
-      derivSql <- nixExtractDeriv nixBuildInfo derivSqlName
-      installPostgres rh derivSql
-    for_ deployTools $ \serviceName -> do
-      service <- nixExtractDeriv nixBuildInfo serviceName
-      nixSymlinkService rh service serviceName False
-    for_ deployServices $ \serviceName -> do
-      service <- nixExtractDeriv nixBuildInfo serviceName
-      nixSymlinkService rh service serviceName True
-      restartRemoteService rh serviceName
+    unless nixifyOnly $ do
+      addHosts rh hosts
+      nixCopyClosures rh (headMay keys) deployUser $ machineAllDerivations mcfg
+      whenJust machineDirectories $ traverse_ (ensureRemoteFolder rh)
+      whenJust machinePostgres $ installPostgres rh
+      whenJust machineServices $ \services -> for_ (M.toList services) $ \(serviceName, ServiceCfg{..}) -> do
+        let enabled = fromMaybe True serviceEnable
+        nixSymlinkService rh serviceUnit serviceName enabled
+        when enabled $ restartRemoteService rh serviceName
