@@ -2,7 +2,7 @@
 
 ## OPPORTUNITIES
 
-We pay money for contributing to this project. Concact dzuikov@gmail.com
+We pay money for contributing to this project. Contact dzuikov@gmail.com
 for details.
 
 
