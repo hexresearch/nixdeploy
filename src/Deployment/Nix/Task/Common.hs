@@ -352,10 +352,14 @@ copyDeploySshKeys rh deployUser = AtomTask {
 , taskCheck = Left ()
 , taskApply = transShell $ do
     let home user = if user == "root" then "/root" else "/home/" <> user
+        sshDir = home deployUser <> "/.ssh"
     _ <- shellRemoteSSH rh [
-        sudo ("cp", ["-r", home (remoteUser rh) <> "/.ssh", home deployUser <> "/.ssh"])
-      , sudo ("chown", [deployUser, "-R", home deployUser <> "/.ssh"])
-      , sudo ("chgrp", [deployUser, "-R", home deployUser <> "/.ssh"])]
+        sudo ("cp", ["-r", home (remoteUser rh) <> "/.ssh", sshDir])
+      , sudo ("chown", [deployUser, "-R", sshDir])
+      , sudo ("chgrp", [deployUser, "-R", sshDir])
+      , sudo ("chmod", ["o-w", home deployUser])
+      , sudo ("chmod", ["700", sshDir])
+      , sudo ("chmod", ["600", sshDir <> "/authorized_keys"])]
     pure ()
 , taskReverse = pure ()
 }
