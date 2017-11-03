@@ -8,6 +8,8 @@ module Deployment.Nix.Task.Common(
   , sshAgent
   , withSshKeys
   , remoteHostTarget
+  , getFingerprints
+  , addFingerprints
   , shellRemoteSSH
   , aptPackages
   , addUser
@@ -34,12 +36,13 @@ module Deployment.Nix.Task.Common(
 import Data.FileEmbed (embedStringFile)
 import Data.Foldable (traverse_)
 import Data.Functor
+import Data.List (nub)
 import Data.Maybe
 import Data.Monoid
 import Data.Text (Text, pack, unpack)
 import Deployment.Nix.Config
 import Deployment.Nix.Task
-import Filesystem.Path (addExtensions)
+import Filesystem.Path (addExtensions, directory)
 import Prelude hiding (FilePath)
 import Safe
 import Shelly
@@ -62,6 +65,21 @@ data NixBuildInfo = NixBuildInfo {
   nixBuildFile :: FilePath
 , nixBuildSshConfig :: Maybe FilePath
 }
+
+-- | Read remote server fingerprints that can be added to known_hosts
+getFingerprints :: RemoteHost -> Sh [Text]
+getFingerprints RemoteHost{..} = T.lines <$> bash "ssh-keyscan" ["-t", "rsa", "-p", pack (show remotePort), remoteAddress]
+
+-- | Add server fingerprints to given path
+addFingerprints :: RemoteHost -> FilePath -> Sh ()
+addFingerprints cfg path = do
+  fingersNew <- getFingerprints cfg
+  isExist <- test_f path
+  unless isExist $ do
+    mkdir_p $ directory path
+    writefile path ""
+  fingersOld <- T.lines <$> readfile path
+  writefile path $ T.unlines $ nub $ fingersOld <> fingersNew
 
 -- | Exec shell commands (concated via &&) on remote host via SSH
 shellRemoteSSH :: RemoteHost -> [(FilePath, [Text])] -> Sh Text

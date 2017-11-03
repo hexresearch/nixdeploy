@@ -27,6 +27,7 @@ import Deployment.Nix.Config
 import Options.Applicative
 import Safe (headMay)
 import Shelly hiding (command)
+import System.Directory (getHomeDirectory)
 import System.FilePath (takeFileName, takeDirectory)
 import Transient.Base hiding (option)
 
@@ -226,6 +227,9 @@ defaultNixPlan nixifyOnly opts@DeployOptions{..} cfg@Config{..} = do
     setMachineName name
     keys <- liftShell "Get keys local path" [] $ getDeploymentKeys cfg mcfg
     traverse_ (sshAgent $ Just keysTimeout) keys
+    liftShell "Add fingerprints" () $ do
+      home <- liftIO getHomeDirectory
+      addFingerprints rh $ fromText (pack home) <> ".ssh/known_hosts"
     nixify rh deployUser
     unless nixifyOnly $ do
       addHosts rh hosts
