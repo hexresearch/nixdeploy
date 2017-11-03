@@ -54,6 +54,7 @@ data RemoteHost = RemoteHost {
   remoteAddress :: Text
 , remotePort    :: Int
 , remoteUser    :: Text
+, remoteDontCheckIdentity :: Bool
 }
 
 -- | Construct user@host
@@ -83,11 +84,15 @@ addFingerprints cfg path = do
 
 -- | Exec shell commands (concated via &&) on remote host via SSH
 shellRemoteSSH :: RemoteHost -> [(FilePath, [Text])] -> Sh Text
-shellRemoteSSH rh@RemoteHost{..} = sshPairsWithOptions (remoteHostTarget rh) ["-p " <> pack (show remotePort)]
+shellRemoteSSH rh@RemoteHost{..} = sshPairsWithOptions (remoteHostTarget rh) $ ["-p " <> pack (show remotePort)] <> if remoteDontCheckIdentity
+  then ["-o UserKnownHostsFile=/dev/null", "-o StrictHostKeyChecking=no"]
+  else []
 
 -- | Copy file from local machine to remote host
 remoteScpTo :: RemoteHost -> FilePath -> FilePath -> Sh ()
-remoteScpTo rh@RemoteHost{..} from to = run_ "scp" ["-P " <> pack (show remotePort), toTextIgnore from, remoteHostTarget rh <> ":" <> toTextIgnore to]
+remoteScpTo rh@RemoteHost{..} from to = run_ "scp" $ ["-P " <> pack (show remotePort), toTextIgnore from, remoteHostTarget rh <> ":" <> toTextIgnore to] <> if remoteDontCheckIdentity
+  then ["-o UserKnownHostsFile=/dev/null", "-o StrictHostKeyChecking=no"]
+  else []
 
 -- | Don't actually reverse actions for the tasks
 dontReverse :: Task a -> Task a
@@ -389,7 +394,10 @@ nixCopyClosures rh mkey deployUser closures = AtomTask {
   , taskCheck = Left ()
   , taskApply = transShell $ do
       let keyArg = maybe "" (\key -> " -i \"" <> (pack . unConfigPath $ key) <> "\"") mkey
-      let sshOpts = "NIX_SSHOPTS='-p " <> pack (show $ remotePort rh) <> keyArg <> "'"
+          identArg = if remoteDontCheckIdentity rh
+            then " -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no"
+            else ""
+          sshOpts = "NIX_SSHOPTS='-p " <> pack (show $ remotePort rh) <> keyArg <> identArg <> "'"
       _ <- escaping False $ run_ (fromText sshOpts) $ ["nix-copy-closure", "--sign", "--gzip", "--to", remoteHostTarget rh { remoteUser = deployUser }]  ++ fmap toTextArg closures
       let installProfile closure = sudoFrom deployUser ("nix-env", ["-p /opt/deploy/profile", "-i", toTextArg closure])
       _ <- shellRemoteSSH rh $ raiseNixEnv deployUser : fmap installProfile closures

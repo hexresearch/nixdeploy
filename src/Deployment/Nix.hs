@@ -48,6 +48,7 @@ data DeployOptions = DeployOptions {
 , deployDry           :: Bool       -- ^ Only print wich tasks need to be deployed
 , deployVerbose       :: Bool       -- ^ Verbose output from shell
 , deployForce         :: Bool       -- ^ When enabled, force all checks to apply tasks
+, deployDontCheckIdentity :: Bool   -- ^ Tell SSH to not check identities (for local VM deploys only, very insecure)
 }
 
 -- | Available CLI commands to perform
@@ -60,11 +61,12 @@ data Command =
     | CommandNixify
 
 -- | Extract remote host info from options
-getRemoteHost :: MachineCfg -> RemoteHost
-getRemoteHost MachineCfg{..} = RemoteHost {
+getRemoteHost :: DeployOptions -> MachineCfg -> RemoteHost
+getRemoteHost DeployOptions{..} MachineCfg{..} = RemoteHost {
     remoteAddress = machineHost
   , remotePort = fromMaybe 22 machinePort
   , remoteUser = fromMaybe "root" machineUser
+  , remoteDontCheckIdentity = deployDontCheckIdentity
   }
 
 -- | Convert input arguments to pairs of kev value and escape if needed
@@ -180,6 +182,10 @@ deployOptionsParser = DeployOptions
     <> short 'f'
     <> help "Force all checks to 'need to apply'"
     )
+  <*> switch (
+       long "dont-check-identity"
+    <> help "Tell SSH to not check identities (for local VM deploys only, very insecure)"
+  )
   where
     cliCommand = subparser $
          command "deploy" (info (deployCmd <**> helper) $ progDesc "Apply deployment to remote host")
@@ -221,13 +227,13 @@ defaultNixPlan nixifyOnly opts@DeployOptions{..} cfg@Config{..} = do
   let hosts = M.elems $ M.mapWithKey (\name MachineCfg{..} -> (machineHost, name)) configMachines
   for_ (M.toList configMachines) $ \(name, mcfg@MachineCfg{..}) -> do
     let
-      rh = getRemoteHost mcfg
+      rh = getRemoteHost opts mcfg
       deployUser = getDeploymentUser cfg mcfg
       keysTimeout = getDeploymentKeysTimeout cfg mcfg
     setMachineName name
     keys <- liftShell "Get keys local path" [] $ getDeploymentKeys cfg mcfg
     traverse_ (sshAgent $ Just keysTimeout) keys
-    liftShell "Add fingerprints" () $ do
+    unless deployDontCheckIdentity $ liftShell "Add fingerprints" () $ do
       home <- liftIO getHomeDirectory
       addFingerprints rh $ fromText (pack home) <> ".ssh/known_hosts"
     nixify rh deployUser
