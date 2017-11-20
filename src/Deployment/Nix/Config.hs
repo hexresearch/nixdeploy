@@ -30,6 +30,7 @@ import Data.Aeson.TH
 import Data.Data
 import Data.Generics.Uniplate.Data
 import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as M
 import Data.Maybe
 import Data.Monoid
 import Data.String
@@ -126,7 +127,7 @@ deriveJSON dropPrefixOptions ''MachineCfg
 -- | Get list of all deriviations that should be copied on remote machine
 machineAllDerivations :: MachineCfg -> [DerivationPath]
 machineAllDerivations MachineCfg{..} = fromMaybe [] machineDerivations
-  <> maybe [] (pure . foldMap serviceUnit) machineServices
+  <> maybe [] (fmap serviceUnit . M.elems) machineServices
   <> maybe [] pure machinePostgres
 
 -- | Config file that is generated from the nix description of deployment.
