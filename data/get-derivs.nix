@@ -15,8 +15,10 @@ let
   fromMachine = {
       derivations ? []
     , services ? {}
+    , timers ? {}
     , ...
-    }: derivations ++ lib.mapAttrsToList (name: fromService) services;
+    }: derivations ++ lib.mapAttrsToList (name: fromService) services
+                   ++ lib.mapAttrsToList (name: fromService) timers;
 
   perMachine = lib.mapAttrsToList (name: fromMachine) machines;
 in lib.unique (lib.flatten perMachine)

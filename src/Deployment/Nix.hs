@@ -249,6 +249,8 @@ defaultNixPlan nixifyOnly opts@DeployOptions{..} cfg@Config{..} = do
       whenJust machineDirectories $ traverse_ (ensureRemoteFolder rh)
       whenJust machinePostgres $ installPostgres rh
       whenJust machineServices $ \services -> for_ (M.toList services) $ \(serviceName, ServiceCfg{..}) -> do
-        let enabled = fromMaybe True serviceEnable
-        nixSymlinkService rh serviceUnit serviceName enabled
-        when enabled $ restartRemoteService rh serviceName
+        nixSymlinkService rh serviceUnit serviceName $ fromMaybe True serviceEnable
+        when (fromMaybe True serviceStart) $ restartRemoteService rh serviceName
+      whenJust machineTimers $ \timers -> for_ (M.toList timers) $ \(timerName, TimerCfg{..}) -> do
+        nixSymlinkTimer rh timerUnit timerName $ fromMaybe True timerEnable
+        when (fromMaybe True timerStart) $ restartRemoteTimer rh timerName
