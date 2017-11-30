@@ -27,7 +27,9 @@ module Deployment.Nix.Task.Common(
   , nixCreateProfile
   , nixExtractDeriv
   , nixSymlinkService
+  , nixSymlinkTimer
   , restartRemoteService
+  , restartRemoteTimer
   , ensureRemoteFolder
   , installPostgres
   , addHosts
@@ -444,26 +446,34 @@ nixExtractDeriv NixBuildInfo{..} name = AtomTask {
       nixFileText <- toTextWarn nixBuildFile
       bash "nix-build" [maybe "" (("-I ssh-config-file=" <>) . toTextIgnore) nixBuildSshConfig, nixFileText, "-A " <> name]
 
--- | Symlink given derivations to systemd folder
+-- | Symlink given service derivations to systemd folder
 nixSymlinkService :: RemoteHost -> Text -> Text -> Bool -> Task ()
-nixSymlinkService rh deriv serviceName enable = AtomTask {
-    taskName = Just $ "Symlink systemd service " <> serviceName <> " at " <> remoteAddress rh
+nixSymlinkService = nixSymlinkSystemd' "service"
+
+-- | Symlink given timer derivations to systemd folder
+nixSymlinkTimer :: RemoteHost -> Text -> Text -> Bool -> Task ()
+nixSymlinkTimer = nixSymlinkSystemd' "timer"
+
+nixSymlinkSystemd' :: Text -> RemoteHost -> Text -> Text -> Bool -> Task ()
+nixSymlinkSystemd' unitWhat rh deriv unitName enable = AtomTask {
+    taskName = Just $ "Symlink systemd " <> unitWhat <> " " <> unitName <> " at " <> remoteAddress rh
   , taskCheck = Left ()
   , taskApply = transShell $ do
-      _ <- errExit False $ shellRemoteSSH rh [sudo ("rm", ["-f", servicePath])]
+      _ <- errExit False $ shellRemoteSSH rh [sudo ("rm", ["-f", cfgFilePath])]
       _ <- shellRemoteSSH rh $
-        [ sudo ("cp", [deriv, servicePath])]
-        ++ if enable then [sudo ("systemctl", ["enable", serviceName <> ".service"])] else []
+        [ sudo ("cp", [deriv, cfgFilePath])]
+        ++ if enable then [sudo ("systemctl", ["enable", unitFullName])] else []
         ++ [sudo ("systemctl", ["daemon-reload"])]
       pure ()
   , taskReverse = transShell $ errExit False $ do
       _ <- shellRemoteSSH rh $
-           if enable then [sudo ("systemctl", ["disable", serviceName <> ".service"])] else []
-        ++ [sudo ("rm", ["-f", servicePath])]
+           if enable then [sudo ("systemctl", ["disable", unitFullName])] else []
+        ++ [sudo ("rm", ["-f", cfgFilePath])]
       pure ()
   }
   where
-    servicePath = "/etc/systemd/system/" <> serviceName <> ".service"
+    unitFullName = unitName <> "." <> unitWhat
+    cfgFilePath = "/etc/systemd/system/" <> unitFullName
 
 -- | Restart given remote service with given name
 restartRemoteService :: RemoteHost -> Text -> Task ()
@@ -472,6 +482,17 @@ restartRemoteService rh serviceName = AtomTask {
   , taskCheck = Left ()
   , taskApply = transShell $ do
       _ <- shellRemoteSSH rh [sudo ("systemctl", ["restart", serviceName])]
+      pure ()
+  , taskReverse = pure ()
+  }
+
+-- | Start remote timer with given name
+restartRemoteTimer :: RemoteHost -> Text -> Task ()
+restartRemoteTimer rh timerName = AtomTask {
+    taskName = Just $ "Start systemd timer " <> timerName <> " at " <> remoteAddress rh
+  , taskCheck = Left ()
+  , taskApply = transShell $ do
+      _ <- shellRemoteSSH rh [sudo ("systemctl", ["restart", timerName <> ".timer"])]
       pure ()
   , taskReverse = pure ()
   }

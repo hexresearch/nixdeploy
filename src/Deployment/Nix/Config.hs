@@ -16,6 +16,7 @@ module Deployment.Nix.Config(
   , DeploymentCfg(..)
   , DirectoryCfg(..)
   , ServiceCfg(..)
+  , TimerCfg(..)
   , MachineCfg(..)
   , machineAllDerivations
   , Config(..)
@@ -49,8 +50,11 @@ type MachineHost = Text
 -- | Port number of target machine
 type MachinePort = Int
 
--- | Name of systemd unit
+-- | Name of systemd service unit
 type ServiceName = Text
+
+-- | Name of systemd timer unit
+type TimerName = Text
 
 -- | Name of system user
 type UserName = Text
@@ -106,9 +110,18 @@ deriveJSON dropPrefixOptions ''DirectoryCfg
 -- | Defines systemd service config
 data ServiceCfg = ServiceCfg {
   serviceEnable :: !(Maybe Bool)   -- ^ Is the service enabled? True by default
+, serviceStart  :: !(Maybe Bool)   -- ^ Do restart the service? True by default
 , serviceUnit   :: !DerivationPath -- ^ Path to unit file that would be copied
 } deriving (Eq, Show, Read, Generic, Data)
 deriveJSON dropPrefixOptions ''ServiceCfg
+
+-- | Defines systemd timer config
+data TimerCfg = TimerCfg {
+  timerEnable :: !(Maybe Bool)   -- ^ Is the timer enabled? True by default
+, timerStart  :: !(Maybe Bool)   -- ^ Do restart the timer? True by default
+, timerUnit   :: !DerivationPath -- ^ Path to unit file that would be copied
+} deriving (Eq, Show, Read, Generic, Data)
+deriveJSON dropPrefixOptions ''TimerCfg
 
 -- | Deployment description of a single machine
 data MachineCfg = MachineCfg {
@@ -120,6 +133,7 @@ data MachineCfg = MachineCfg {
 , machinePort        :: !(Maybe MachinePort)                  -- ^ Machine SSH port
 , machineUser        :: !(Maybe UserName)                     -- ^ Machine SSH user that has passwordless sudo
 , machineServices    :: !(Maybe (Map ServiceName ServiceCfg)) -- ^ Systemd services that should be activated
+, machineTimers      :: !(Maybe (Map TimerName TimerCfg))     -- ^ Systemd timers that starts services
 , machinePostgres    :: !(Maybe DerivationPath)               -- ^ Install system Postgres and run the init script
 } deriving (Eq, Show, Read, Generic, Data)
 deriveJSON dropPrefixOptions ''MachineCfg
@@ -128,6 +142,7 @@ deriveJSON dropPrefixOptions ''MachineCfg
 machineAllDerivations :: MachineCfg -> [DerivationPath]
 machineAllDerivations MachineCfg{..} = fromMaybe [] machineDerivations
   <> maybe [] (fmap serviceUnit . M.elems) machineServices
+  <> maybe [] (fmap timerUnit . M.elems) machineTimers
   <> maybe [] pure machinePostgres
 
 -- | Config file that is generated from the nix description of deployment.
