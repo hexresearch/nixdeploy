@@ -15,6 +15,7 @@ module Deployment.Nix(
   ) where
 
 import Control.Arrow (second)
+import Control.Exception.Base (SomeException)
 import Control.Monad.IO.Class
 import Data.Aeson
 import Data.Foldable (traverse_, for_)
@@ -26,8 +27,9 @@ import Data.Text.Encoding
 import Deployment.Nix.Config
 import Options.Applicative
 import Safe (headMay)
-import Shelly hiding (command)
+import Shelly hiding (command, exit)
 import System.Directory (getHomeDirectory)
+import System.Exit
 import System.FilePath (takeFileName, takeDirectory)
 import Transient.Base hiding (option)
 
@@ -122,7 +124,11 @@ runDeployment o@DeployOptions{..} buildPlan = do
   let dryRun ma = do
         infos <- dryRunTask ma
         liftIO $ traverse_ (\(mn, b) -> echonColor White (fromMaybe "unnamed" mn <> " is ") >> if b then echoColor Green "applied" else echoColor Red "not applied" ) infos
-  void $ keep' $ do
+
+  (maybe (pure ()) (const exitFailure) =<<) $ keep' $ do
+    onException $ \(e :: SomeException) -> do
+        liftIO $ putStrLn $ "Error: " <> show e
+        exit ()
     setShellOptions ShellOptions {
         shellVerbose = deployVerbose
       }
