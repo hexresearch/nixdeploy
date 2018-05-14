@@ -400,7 +400,7 @@ nixCopyClosures rh mkey deployUser closures = AtomTask {
             then " -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no"
             else ""
           sshOpts = "NIX_SSHOPTS='-p " <> pack (show $ remotePort rh) <> keyArg <> identArg <> "'"
-      _ <- escaping False $ run_ (fromText sshOpts) $ ["nix-copy-closure", "--sign", "--gzip", "--to", remoteHostTarget rh { remoteUser = deployUser }]  ++ fmap toTextArg closures
+      _ <- escaping False $ run_ (fromText sshOpts) $ ["nix-copy-closure", "--gzip", "--to", remoteHostTarget rh { remoteUser = deployUser }]  ++ fmap toTextArg closures
       let installProfile closure = sudoFrom deployUser ("nix-env", ["-p /opt/deploy/profile", "-i", toTextArg closure])
       _ <- shellRemoteSSH rh $ raiseNixEnv deployUser : fmap installProfile closures
       pure ()
