@@ -85,10 +85,41 @@ addFingerprints cfg path = do
   writefile path $ T.unlines $ nub $ fingersOld <> fingersNew
 
 -- | Exec shell commands (concated via &&) on remote host via SSH
-shellRemoteSSH :: RemoteHost -> [(FilePath, [Text])] -> Sh Text
-shellRemoteSSH rh@RemoteHost{..} = sshPairsWithOptions (remoteHostTarget rh) $ ["-p " <> pack (show remotePort)] <> if remoteDontCheckIdentity
+shellRemoteSSH' :: RemoteHost -> [(FilePath, [Text])] -> Sh Text
+shellRemoteSSH' rh@RemoteHost{..} = sshRun (remoteHostTarget rh) $ ["-p"] <> [pack (show remotePort)] <> if remoteDontCheckIdentity
   then ["-o UserKnownHostsFile=/dev/null", "-o StrictHostKeyChecking=no"]
   else []
+
+-- Perform action on remote host. Each action with separate ssh connection
+shellRemoteSSH :: RemoteHost -> [(FilePath, [Text])] -> Sh [Text]
+shellRemoteSSH rh cmds = mapM (shellRemoteSSH' rh . (:[])) cmds
+
+-- | Like 'sshPairs', but allows for arguments to the call to ssh.
+sshRun :: Text                  -- ^ Server name.
+       -> [Text]                -- ^ Arguments to ssh (e.g. ["-p","22"]).
+       -> [(FilePath, [Text])]  -- ^ Pairs of commands to run on the remote.
+       -> Sh Text               -- ^ Returns the standard output.
+sshRun _ _ [] = return ""
+sshRun server sshargs cmds = sshRun' run server sshargs cmds SeqSsh
+
+sshRun' :: (FilePath -> [Text] -> Sh a) -> Text -> [Text] -> [(FilePath, [Text])] -> SshMode  -> Sh a
+sshRun' run' server sshargs actions mode = escaping False $ do
+    run' "ssh" ([server] ++ sshargs ++ [sshCommandText' actions mode])
+
+sshCommandText' :: [(FilePath, [Text])] -> SshMode -> Text
+sshCommandText' actions mode =
+             (foldl1 joiner (map (uncurry quoteCommand') actions))
+    -- quoteOne (foldl1 joiner (map (uncurry quoteCommand') actions))
+  where
+    joiner memo next = case mode of
+        SeqSsh -> memo <> " && " <> next
+        ParSsh -> memo <> " & " <> next
+
+quoteCommand' :: FilePath -> [Text] -> Text
+quoteCommand' exe args =
+    T.intercalate " " (toTextIgnore exe : args)
+    -- T.intercalate " " $ map quoteOne (toTextIgnore exe : args)
+
 
 -- | Copy file from local machine to remote host
 remoteScpTo :: RemoteHost -> FilePath -> FilePath -> Sh ()
@@ -185,6 +216,21 @@ sudo (prog, args) = ("sudo", toTextArg prog : args)
 sudoFrom :: Text -> (FilePath, [Text]) -> (FilePath, [Text])
 sudoFrom user (prog, args) = ("sudo", ["-i", "-u " <> user] ++ toTextArg prog : args)
 
+-- -- | Helper for switching via sudo to another user
+-- sudoFromBatch :: Text -> [(FilePath, [Text])] -> (FilePath, [Text])
+-- sudoFromBatch user commands =
+--   let cmds = T.intercalate " ; " $ commands <&> squeezeCmd
+--   in ("sudo", [T.intercalate " " ["-i", "-u " <> user, "bash", "-c", "\"" <> cmds <> "\""]])
+
+-- squeezeCmd :: (FilePath, [Text]) -> Text
+-- squeezeCmd (fp, cs) = T.intercalate " " (toTextArg fp : cs)
+
+-- | Copypasted from Control.Lens.Operators
+(<&>) :: Functor f => f a -> (a -> b) -> f b
+as <&> f = f <$> as
+{-# INLINE (<&>) #-}
+infixl 1 <&>
+
 -- | Install needed packages
 aptPackages :: RemoteHost -> [Text] -> Task ()
 aptPackages rh pkgs = AtomTask {
@@ -228,7 +274,7 @@ addUser rh user = AtomTask {
     err <- lastExitCode
     pure (err /= 0, ())
 , taskApply = void $ transShell $
-    shellRemoteSSH rh [sudo ("useradd", ["-m", "-s /bin/bash", user])]
+    shellRemoteSSH rh [sudo ("useradd", ["-m", "-U", "-s", "/bin/bash", user])]
 , taskReverse = transShell $ errExit False $ do
     _ <- shellRemoteSSH rh [sudo ("userdel", ["-r", user])]
     pure ()
@@ -239,13 +285,17 @@ installNix :: RemoteHost -> Text -> Task ()
 installNix rh deployUser = AtomTask {
   taskName = Just "Installation of nix package manager"
 , taskCheck = Right $ transShell $ errExit False $ do
-    _ <- shellRemoteSSH rh [raiseNixEnv deployUser, ("which", ["nix-build > /dev/null 2>&1"])]
+    _ <- shellRemoteSSH rh
+        -- Тут у пользователя может ещё не быть профиля nix, и тогда не можем `raiseNixEnv`
+        -- [ sudoFromBatch deployUser [raiseNixEnv deployUser, ("which", ["nix-build"])]
+        [ ("ls", ["-d /nix > /dev/null 2>&1"])
+        ]
     err <- lastExitCode
     pure (err /= 0, ())
 , taskApply = void $ transShell $
     shellRemoteSSH rh [
         sudo ("mkdir", ["-m 0755", "/nix"])
-      , sudo ("chown", [deployUser, "-R", "/nix"])
+      , sudo ("chown", ["-R", deployUser, "/nix"])
       , sudoFrom deployUser ("curl", ["https://nixos.org/nix/install", "-o /tmp/install_nix.sh"])
       , sudoFrom deployUser ("sh", ["/tmp/install_nix.sh"])]
 , taskReverse = transShell $ errExit False $ do
@@ -380,11 +430,12 @@ copyDeploySshKeys rh deployUser = AtomTask {
         sshDir = home deployUser <> "/.ssh"
     _ <- shellRemoteSSH rh [
         sudo ("cp", ["-r", home (remoteUser rh) <> "/.ssh", sshDir])
-      , sudo ("chown", [deployUser, "-R", sshDir])
-      , sudo ("chgrp", [deployUser, "-R", sshDir])
+      , sudo ("chown", ["-R", deployUser, sshDir])
+      , sudo ("chgrp", ["-R", deployUser, sshDir])
       , sudo ("chmod", ["o-w", home deployUser])
       , sudo ("chmod", ["700", sshDir])
-      , sudo ("chmod", ["600", sshDir <> "/authorized_keys"])]
+      , sudo ("chmod", ["600", sshDir <> "/authorized_keys"])
+      ]
     pure ()
 , taskReverse = pure ()
 }
@@ -400,13 +451,18 @@ nixCopyClosures rh mkey deployUser closures = AtomTask {
             then " -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no"
             else ""
           sshOpts = "NIX_SSHOPTS='-p " <> pack (show $ remotePort rh) <> keyArg <> identArg <> "'"
-      _ <- escaping False $ run_ (fromText sshOpts) $ ["nix-copy-closure", "--gzip", "--to", remoteHostTarget rh { remoteUser = deployUser }]  ++ fmap toTextArg closures
-      let installProfile closure = sudoFrom deployUser ("nix-env", ["-p /opt/deploy/profile", "-i", toTextArg closure])
-      _ <- shellRemoteSSH rh $ raiseNixEnv deployUser : fmap installProfile closures
+      _ <- escaping False $ run_ (fromText sshOpts) $
+        [ "nix-copy-closure", "--gzip"
+        , "--to", remoteHostTarget rh { remoteUser = deployUser }
+        ] <> fmap toTextArg closures
+      -- Новый nix-env ломается при установке выражения — не каталога, а файла
+      -- Поэтому не устанавливаем в профиль.
+      -- let installProfile closure = sudoFrom deployUser ("nix-env", ["-k", "-p", "/opt/deploy/profile", "-i", toTextArg closure])
+      -- _ <- shellRemoteSSH rh $ fmap installProfile closures
       pure ()
   , taskReverse = transShell $ errExit False $ do
-      let removeProfile closure = sudoFrom deployUser ("nix-env", ["nix-env", "-p /opt/deploy/profile", "-e", toTextArg closure])
-      _ <- shellRemoteSSH rh (raiseNixEnv deployUser : fmap removeProfile closures)
+      -- let removeProfile closure = sudoFrom deployUser ("nix-env", ["nix-env", "-p", "/opt/deploy/profile", "-e", toTextArg closure])
+      -- _ <- shellRemoteSSH rh $ fmap removeProfile closures
       pure ()
   }
 
@@ -529,7 +585,7 @@ addHosts rh newHosts = AtomTask {
     pure (and . fmap not $ reses, ())
 , taskApply = void $ transShell $ do
     let cnt = T.intercalate "\n" $ (\(k, v) -> k <> "  " <> v) <$> newHosts
-    hosts <- shellRemoteSSH rh [("cat", ["/etc/hosts"])]
+    hosts <- fmap mconcat $ shellRemoteSSH rh [("cat", ["/etc/hosts"])]
     withTmpDir $ \dir -> do
       let tmpFile = dir </> fromText "hosts"
       writefile tmpFile $ hosts <> cnt <> "\n"
@@ -558,8 +614,8 @@ nixify :: RemoteHost -> Text -> Task ()
 nixify rh deployUser = do
   aptPackages rh ["curl", "bzip2"]
   let deployUser = "deploy"
-  addUser rh deployUser
-  installNix rh deployUser
+  dontReverse $ addUser rh deployUser
+  dontReverse $ installNix rh deployUser
   nixCreateProfile rh deployUser
   makeNixLinks rh deployUser
   dontReverse genNixSignKeys

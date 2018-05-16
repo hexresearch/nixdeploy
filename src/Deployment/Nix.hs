@@ -245,7 +245,7 @@ defaultNixPlan nixifyOnly opts@DeployOptions{..} cfg@Config{..} = do
     nixify rh deployUser
     unless nixifyOnly $ do
       addHosts rh hosts
-      nixCopyClosures rh (headMay keys) deployUser $ machineAllDerivations mcfg
+      dontReverse $ nixCopyClosures rh (headMay keys) deployUser $ machineAllDerivations mcfg
       whenJust machineDirectories $ traverse_ (ensureRemoteFolder rh)
       whenJust machinePostgres $ installPostgres rh
       whenJust machineServices $ \services -> for_ (M.toList services) $ \(serviceName, ServiceCfg{..}) -> do
