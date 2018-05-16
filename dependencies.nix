@@ -23,6 +23,7 @@ let
         cabalCallE = name: path: addSrcFilter (justStaticExecutables (haskellPackagesNew.callCabal2nix name path { }));
       in rec {
         nixdeploy = cabalCall "nixdeploy" ./.;
+        shelly    = call ./nixdeps/shelly.nix {};
       };
     };
 in { inherit packages; }
