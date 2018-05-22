@@ -347,8 +347,8 @@ genNixSignKeys = AtomTask {
 }
 
 -- | Transfer nix signing keys to remote host
-copyNixSignKeys :: RemoteHost -> Task ()
-copyNixSignKeys rh = AtomTask {
+copyNixSignKeys :: RemoteHost -> Text -> Task ()
+copyNixSignKeys rh deployUser = AtomTask {
   taskName = Just $ "Copy signing keys to " <> remoteAddress rh
 , taskCheck = Right $ transShell $ errExit False $ do
     _ <- shellRemoteSSH rh [sudo ("ls", [keyPos <> " > /dev/null 2>&1"])]
@@ -356,7 +356,8 @@ copyNixSignKeys rh = AtomTask {
     pure (err /= 0, ())
 , taskApply = transShell $ do
     _ <- errExit False $ shellRemoteSSH rh [sudo ("mkdir", ["-p", "/etc/nix"])]
-    let tmpKeyPos = "~/signing-key.pub"
+    let home user = if user == "root" then "/root" else "/home/" <> user
+    let tmpKeyPos = home deployUser <> "/signing-key.pub"
     remoteScpTo rh (fromText keyPos) (fromText tmpKeyPos)
     _ <- shellRemoteSSH rh [sudo ("mv", [tmpKeyPos, keyPos])]
     pure ()
@@ -619,5 +620,5 @@ nixify rh deployUser = do
   nixCreateProfile rh deployUser
   makeNixLinks rh deployUser
   dontReverse genNixSignKeys
-  copyNixSignKeys rh
+  copyNixSignKeys rh deployUser
   copyDeploySshKeys rh deployUser
